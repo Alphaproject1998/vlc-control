@@ -1,0 +1,49 @@
+{
+  "title": "VLC Control Share",
+  "subtitle": "",
+  "footerText": "Tip: spacebar to play / pause.",
+  "theme": {
+    "background": "#0b0f14",
+    "panel": "#101826",
+    "panel2": "#0e1522",
+    "text": "#e8eef6",
+    "muted": "#a8b3c4",
+    "border": "rgba(255,255,255,.08)",
+    "shadow": "0 10px 30px rgba(0,0,0,.45)",
+    "radius": "15px",
+    "accent": "#7c3aed",
+    "danger": "#ef4444",
+    "ok": "#22c55e"
+  },
+  "layout": {
+    "showTitleBar": true,
+    "showNowPlaying": true,
+    "showSeekBar": true,
+    "showSeekPreview": true,
+    "showMetaBar": true,
+    "showState": true,
+    "showClock": true,
+    "showClients": true,
+    "showWSStatus": true,
+    "showButtons": true,
+    "showIcons": true,
+    "showSystemStatus": true,
+    "showFooter": true
+  },
+  "buttons": {
+    "playPause": true,
+    "stop": true,
+    "previous": true,
+    "next": true,
+    "seekJumps": true
+  },
+  "features": {
+    "allowSeeking": true,
+    "keyboardEvents": true,
+    "updateTabTitle": true
+  },
+  "config": {
+    "seekJumpBy": 10,
+    "clockShowRemaining": false
+  }
+}

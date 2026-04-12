@@ -1,0 +1,439 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: <<'DOC'
+vlc-control runner
+
+Starts the Python bridge and optionally a Cloudflare quick tunnel.
+Reads config from ~/.config/vlc-control/config.env (or XDG overrides).
+DOC
+
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"
+PREFIX="${VLC_CONTROL_PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/vlc-control}"
+
+show_help() {
+  cat <<'H'
+vlc-control [run] [--seats N|-s N]
+
+Runs the local bridge + (optional) Cloudflare quick tunnel.
+
+Options:
+  -s, --seats N   Override max seats (clients) for this run only
+  -h, --help      Show this help
+H
+}
+
+# Custom parser instead of `source` so config.env can't run shell.
+load_env_file() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+
+    [[ -z "$line" ]] && continue
+    [[ "$line" == \#* ]] && continue
+    [[ "$line" == *"="* ]] || continue
+
+    local key="${line%%=*}"
+    local val="${line#*=}"
+
+    key="${key%"${key##*[![:space:]]}"}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    val="${val#"${val%%[![:space:]]*}"}"
+    val="${val%"${val##*[![:space:]]}"}"
+
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+
+    if [[ "$val" == \"*\" && "$val" == *\" ]]; then
+      val="${val:1:${#val}-2}"
+      val="${val//\\\"/\"}"
+      val="${val//\\\\/\\}"
+      val="${val//\\\$/\$}"
+      val="${val//\\\`/\`}"
+    elif [[ "$val" == \'*\' && "$val" == *\' ]]; then
+      val="${val:1:${#val}-2}"
+    fi
+
+    printf -v "$key" '%s' "$val"
+    export "$key"
+  done < "$file"
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  show_help
+  exit 0
+fi
+
+SEATS_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -s|--seats)
+      shift
+      SEATS_OVERRIDE="${1:-}"
+      shift || true
+      ;;
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      echo "Try: vlc-control --help" >&2
+      exit 2
+      ;;
+  esac
+done
+
+CONFIG_DIR="${VLC_CONTROL_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vlc-control}"
+CFG_ENV="$CONFIG_DIR/config.env"
+
+if [[ ! -f "$CFG_ENV" ]]; then
+  echo "Missing config: $CFG_ENV" >&2
+  echo "Run install.sh to create it." >&2
+  exit 1
+fi
+
+load_env_file "$CFG_ENV" || {
+  echo "Failed to load config: $CFG_ENV" >&2
+  exit 1
+}
+
+: "${PORT:?Missing PORT in config.env}"
+: "${MAX_CLIENTS:?Missing MAX_CLIENTS in config.env}"
+: "${GRACE_SECONDS:?Missing GRACE_SECONDS in config.env}"
+: "${VLC_HOST:?Missing VLC_HOST in config.env}"
+: "${VLC_PORT:?Missing VLC_PORT in config.env}"
+: "${VLC_PASS:=}"
+: "${VLC_MODE:=auto}"
+: "${START_VLC:=yes}"
+: "${CLOUDFLARE:=auto}"
+
+if [[ -n "${VLC_CONTROL_SEATS:-}" && -z "$SEATS_OVERRIDE" ]]; then
+  SEATS_OVERRIDE="$VLC_CONTROL_SEATS"
+fi
+
+if [[ -n "$SEATS_OVERRIDE" ]]; then
+  if ! [[ "$SEATS_OVERRIDE" =~ ^[0-9]+$ ]] || [[ "$SEATS_OVERRIDE" -lt 1 ]] || [[ "$SEATS_OVERRIDE" -gt 99 ]]; then
+    echo "[!] Invalid seats override: '$SEATS_OVERRIDE' (expected 1..99)" >&2
+    exit 2
+  fi
+  MAX_CLIENTS="$SEATS_OVERRIDE"
+  export MAX_CLIENTS
+fi
+
+TOKEN="$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)"
+export TOKEN
+
+export VLC_CONTROL_CONFIG_DIR="$CONFIG_DIR"
+
+VLC_URL="http://${VLC_HOST}:${VLC_PORT}"
+export VLC_URL VLC_PASS MAX_CLIENTS GRACE_SECONDS PORT
+
+PIDFILE="/tmp/vlc-control-bridge.pid"
+
+echo
+echo "Token:     $TOKEN"
+echo "Local URL: http://127.0.0.1:${PORT}/?t=${TOKEN}"
+echo
+
+auto_detect_vlc_mode() {
+  if command -v flatpak >/dev/null 2>&1 && flatpak info org.videolan.VLC >/dev/null 2>&1; then
+    echo "flatpak"; return
+  fi
+  if command -v vlc >/dev/null 2>&1; then
+    echo "native"; return
+  fi
+  echo "none"
+}
+
+resolved_vlc_mode="$VLC_MODE"
+if [[ "$resolved_vlc_mode" == "auto" || -z "$resolved_vlc_mode" ]]; then
+  resolved_vlc_mode="$(auto_detect_vlc_mode)"
+fi
+
+vlc_port_open() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -qE "[[:space:]]${VLC_HOST//./\.}:${VLC_PORT}[[:space:]]" && return 0
+    ss -ltn 2>/dev/null | grep -qE "[:\]]${VLC_PORT}[[:space:]]" && return 0
+    return 1
+  fi
+  (exec 3<>"/dev/tcp/${VLC_HOST}/${VLC_PORT}") >/dev/null 2>&1 && { exec 3<&- 3>&-; return 0; }
+  return 1
+}
+
+vlc_http_auth_ok() {
+  command -v curl >/dev/null 2>&1 || return 1
+  curl -fsS --max-time 1 -u ":${VLC_PASS}" "${VLC_URL}/requests/status.json" >/dev/null 2>&1
+}
+
+start_vlc_if_needed() {
+  if vlc_port_open; then
+    if vlc_http_auth_ok; then
+      echo "[*] Detected existing VLC HTTP at ${VLC_URL} (auth OK)."
+    else
+      echo "[!] Detected something listening at ${VLC_URL}, but auth failed with current VLC_PASS."
+      echo "    I will NOT start another VLC instance."
+      echo "    Fix: set VLC_PASS in ${CFG_ENV} to match VLC's HTTP password, or start VLC with that password."
+      echo "[!] Aborting!"
+      exit 1
+    fi
+    return 0
+  fi
+
+  if [[ "${START_VLC}" != "yes" ]]; then
+    echo "[!] VLC port ${VLC_PORT} not open, and START_VLC=no. Start VLC manually."
+    return 1
+  fi
+
+  if [[ "$resolved_vlc_mode" == "none" ]]; then
+    echo "[!] VLC not found (resolved VLC_MODE=none). Start VLC manually."
+    return 1
+  fi
+
+  echo "[*] Starting VLC (${resolved_vlc_mode}) with HTTP control..."
+  if [[ "$resolved_vlc_mode" == "flatpak" ]]; then
+    flatpak run org.videolan.VLC \
+      --extraintf http \
+      --http-host "${VLC_HOST}" \
+      --http-port "${VLC_PORT}" \
+      --http-password "${VLC_PASS}" \
+      >/tmp/vlc-http.log 2>&1 &
+  else
+    vlc \
+      --extraintf http \
+      --http-host "${VLC_HOST}" \
+      --http-port "${VLC_PORT}" \
+      --http-password "${VLC_PASS}" \
+      >/tmp/vlc-http.log 2>&1 &
+  fi
+
+  for _ in {1..30}; do
+    vlc_port_open && break
+    sleep 0.2
+  done
+
+  if vlc_port_open; then
+    echo "[*] VLC started and port is open."
+  else
+    echo "[!] VLC did not open port ${VLC_PORT} yet. Check /tmp/vlc-http.log"
+    return 1
+  fi
+}
+
+stop_existing_bridge() {
+  if [[ -f "$PIDFILE" ]]; then
+    local old_pid
+    old_pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+    if [[ -n "${old_pid}" ]] && kill -0 "${old_pid}" >/dev/null 2>&1; then
+      echo "[*] Stopping existing bridge PID ${old_pid}..."
+      kill "${old_pid}" >/dev/null 2>&1 || true
+      for _ in {1..40}; do
+        kill -0 "${old_pid}" >/dev/null 2>&1 || break
+        sleep 0.1
+      done
+    fi
+    rm -f "$PIDFILE" || true
+  fi
+}
+
+start_bridge() {
+  stop_existing_bridge
+
+  cd "$PREFIX"
+  # shellcheck disable=SC1090
+  source "$PREFIX/.venv/bin/activate"
+
+  : > /tmp/vlc-bridge.log
+  python "$PREFIX/vlc-bridge.py" >>/tmp/vlc-bridge.log 2>&1 &
+  BRIDGE_PID=$!
+  echo "$BRIDGE_PID" > "$PIDFILE" || true
+
+  local origin="http://127.0.0.1:${PORT}"
+  for _ in {1..80}; do
+    if command -v curl >/dev/null 2>&1; then
+      if curl -4 -fsS --max-time 1 "${origin}/api/clients?t=${TOKEN}&cid=probe" >/dev/null 2>&1; then
+        break
+      fi
+    else
+      break
+    fi
+    sleep 0.1
+  done
+
+  deactivate || true
+  echo "[*] Bridge PID: $BRIDGE_PID"
+}
+
+start_cloudflared() {
+  case "${CLOUDFLARE}" in
+    off) echo "[*] Cloudflare disabled (CLOUDFLARE=off)."; return 0 ;;
+    on|auto) ;;
+    *) echo "[!] Unknown CLOUDFLARE=${CLOUDFLARE}. Use auto|on|off."; return 1 ;;
+  esac
+
+  if ! command -v cloudflared >/dev/null 2>&1; then
+    if [[ "${CLOUDFLARE}" == "on" ]]; then
+      echo "[!] cloudflared missing but CLOUDFLARE=on." >&2
+      return 1
+    fi
+    echo "[*] cloudflared not installed; local-only mode."
+    return 0
+  fi
+
+  ORIGIN_URL="http://127.0.0.1:${PORT}"
+
+  if command -v curl >/dev/null 2>&1; then
+    if ! curl -4 -fsS --max-time 1 "${ORIGIN_URL}/" >/dev/null 2>&1; then
+      echo "[!] Local bridge is not reachable at ${ORIGIN_URL}/" >&2
+      echo "    Not starting Cloudflare tunnel. Check /tmp/vlc-bridge.log" >&2
+      return 1
+    fi
+
+    if ! curl -4 -fsS --max-time 1 "${ORIGIN_URL}/api/clients?t=${TOKEN}&cid=probe" >/dev/null 2>&1; then
+      local code
+      code="$(curl -4 -s -o /dev/null -w "%{http_code}" --max-time 1 "${ORIGIN_URL}/api/clients?t=${TOKEN}&cid=probe" || true)"
+      echo "[!] Bridge token check failed (HTTP ${code}) at ${ORIGIN_URL}/api/clients" >&2
+      echo "    TOKEN mismatch or bridge not fully ready. Check /tmp/vlc-bridge.log" >&2
+      return 1
+    fi
+  fi
+
+  echo "[*] Starting Cloudflare tunnel (quick tunnel)..."
+  : > /tmp/vlc-cloudflared.log
+  cloudflared tunnel --no-autoupdate --url "${ORIGIN_URL}" >>/tmp/vlc-cloudflared.log 2>&1 &
+  CF_PID=$!
+  echo "[*] Tunnel PID: $CF_PID"
+
+  PUBLIC_URL=""
+  for _ in {1..80}; do
+    PUBLIC_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/vlc-cloudflared.log | tail -n 1 || true)"
+    [[ -n "$PUBLIC_URL" ]] && break
+    sleep 0.2
+  done
+
+  if [[ -n "$PUBLIC_URL" ]]; then
+    SHARE_URL="${PUBLIC_URL}/?t=${TOKEN}"
+    echo
+    echo "==================== SHARE LINK ===================="
+    echo "$SHARE_URL"
+    echo "===================================================="
+    echo
+
+    if command -v wl-copy >/dev/null 2>&1; then
+      printf '%s' "$SHARE_URL" | wl-copy
+      echo "(Copied to clipboard via wl-copy)"
+    elif command -v xclip >/dev/null 2>&1; then
+      printf '%s' "$SHARE_URL" | xclip -selection clipboard
+      echo "(Copied to clipboard via xclip)"
+    fi
+  else
+    echo "[!] Tunnel started but URL not found yet. Showing last 40 log lines:" >&2
+    tail -n 40 /tmp/vlc-cloudflared.log >&2 || true
+  fi
+}
+
+HOSTLOG_LOCK="/tmp/vlc-control-hostlog.lock"
+HOSTLOG_PIDFILE="/tmp/vlc-control-hostlog.pid"
+
+start_hostlog() {
+  stop_hostlog
+
+  local awkfile="/tmp/vlc-hostlog.awk"
+  cat > "$awkfile" <<'AWK'
+function ts(){ cmd="date +\"%H:%M:%S\""; cmd|getline t; close(cmd); return t }
+$1!="EVENT"{ next }
+{
+  delete kv
+  for(i=2;i<=NF;i++){ split($i,a,"="); if(a[1]!="") kv[a[1]]=a[2] }
+
+  if(kv["type"]=="client_join"){
+    printf("[%s] [+] Client joined: %s (%s)\n", ts(), (kv["name"]?kv["name"]:"unknown"), (kv["cid"]?kv["cid"]:"?"))
+    fflush(); next
+  }
+
+  if(kv["type"]=="client_leave"){
+    printf("[%s] [-] Client left: %s\n", ts(), (kv["cid"]?kv["cid"]:"?"))
+    fflush(); next
+  }
+
+  if(kv["type"]=="action"){
+    who=kv["who"]?kv["who"]:"?"
+    cid=kv["cid"]?(" cid="kv["cid"]):""
+    op=kv["op"]?kv["op"]:"?"
+
+    detail=""
+    if(kv["at"]){
+      detail=" "kv["at"]
+      if(kv["length"]) detail=detail" / "kv["length"]
+    } else if(kv["value"]){
+      detail=" "kv["value"]
+    }
+
+    printf("[%s] [*] %s%s -> %s%s\n", ts(), who, cid, op, detail)
+    fflush(); next
+  }
+
+  printf("[%s] [?] %s\n", ts(), $0); fflush()
+}
+AWK
+
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash -c "tail -n 0 -F /tmp/vlc-bridge.log 2>/dev/null | awk -f '$awkfile'" &
+    echo $! > "$HOSTLOG_PIDFILE"
+  else
+    ( tail -n 0 -F /tmp/vlc-bridge.log 2>/dev/null | awk -f "$awkfile" ) &
+    echo $! > "$HOSTLOG_PIDFILE"
+  fi
+}
+
+stop_hostlog() {
+  if [[ -f "$HOSTLOG_PIDFILE" ]]; then
+    local pgid
+    pgid="$(cat "$HOSTLOG_PIDFILE" 2>/dev/null || true)"
+    if [[ -n "$pgid" ]] && kill -0 "$pgid" >/dev/null 2>&1; then
+      kill -TERM "-$pgid" 2>/dev/null || true
+      sleep 0.1
+      kill -KILL "-$pgid" 2>/dev/null || true
+    fi
+    rm -f "$HOSTLOG_PIDFILE" 2>/dev/null || true
+  fi
+}
+
+cleanup() {
+  echo
+  echo "[*] Stopping..."
+  [[ -n "${CF_PID:-}" ]] && kill "$CF_PID" 2>/dev/null || true
+  [[ -n "${BRIDGE_PID:-}" ]] && kill "$BRIDGE_PID" 2>/dev/null || true
+  stop_hostlog
+}
+trap cleanup INT TERM EXIT
+
+start_vlc_if_needed || true
+start_bridge
+start_hostlog
+
+echo "[*] PATH=$PATH" >>/tmp/vlc-cloudflared.log
+command -v cloudflared >>/tmp/vlc-cloudflared.log 2>&1 || echo "[!] cloudflared not in PATH" >>/tmp/vlc-cloudflared.log
+
+start_cloudflared
+
+echo
+echo "[OK] Running. Logs:"
+echo " - /tmp/vlc-bridge.log"
+echo " - /tmp/vlc-http.log"
+echo " - /tmp/vlc-cloudflared.log"
+echo "Press Ctrl+C to stop."
+echo
+
+while true; do sleep 1; done

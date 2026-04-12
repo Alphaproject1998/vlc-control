@@ -1,0 +1,25 @@
+# Hide all dotfiles/dotdirs except this file
+.*
+!.gitignore
+
+# Old versions of repo files & dev testing
+backups/
+dev/
+
+# Python bytecode (if running/testing from this dir)
+__pycache__/
+*.py[cod]
+.venv/
+
+# Editor swap files
+*.swp
+*~
+
+# Test artifacts
+.pytest_cache/
+.coverage
+
+# Build output
+node_modules/
+dist/
+build/

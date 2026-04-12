@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VLC Control</title>
+  <meta name="color-scheme" content="dark" />
+  <link href="app.css" rel="stylesheet">
+</head>
+<body>
+<div id="loader" class="loader">
+  <div class="spinner" aria-hidden="true"></div>
+  <div class="loaderText" id="loaderText">Loading…</div>
+</div>
+
+<div id="appRoot" class="app-hidden">
+  <main class="card">
+    <header>
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M9 7.5v9l8-4.5-8-4.5Z" fill="currentColor" />
+        </svg>
+      </div>
+      <div>
+        <h1>Alphaproject's Stream</h1>
+        <p class="sub">Work in progress.</p>
+      </div>
+    </header>
+
+    <div class="content">
+      <div class="now">
+        <div class="label">Now playing</div>
+        <div class="title" id="title">Waiting for a slot…</div>
+
+        <div class="progress-wrap" id="pwrap">
+          <div class="preview" id="preview">Seek to 0:00</div>
+          <input id="progress" type="range" min="0" max="1000" value="0" />
+          <div class="meta">
+            <div class="chips">
+              <span class="chip" id="state">state: locked</span>
+              <span class="chip" id="clock" title="Click to toggle remaining time" style="cursor:pointer;">0:00 / 0:00</span>
+            </div>
+            <div class="chips">
+              <span class="chip" id="clients">clients: ?/?</span>
+              <span class="chip" id="ws">ws: waiting</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid">
+        <button class="primary" id="btnToggle">⏯️ <span>Play / Pause</span></button>
+        <button class="danger" id="btnStop">⏹️ <span>Stop</span></button>
+        <button id="btnPrev">⏮️ <span>Previous</span></button>
+        <button id="btnNext">⏭️ <span>Next</span></button>
+        <button id="btnBack">⟲ <span>-10s</span></button>
+        <button id="btnFwd">⟳ <span>+10s</span></button>
+      </div>
+
+      <div class="status">
+        <span id="out">Waiting…</span>
+        <span class="pill" id="pill">WAIT</span>
+      </div>
+
+      <div class="foot" id="footerText">Tip: keep the link private.</div>
+    </div>
+  </main>
+</div>
+
+<script src="app.js" defer></script>
+</body>
+</html>
