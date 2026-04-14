@@ -9,6 +9,9 @@ Installs into XDG locations by default:
 - config: ~/.config/vlc-control
 - bin:    ~/.local/bin/vlc-control
 
+Use --prefix <path> to install everything under a custom directory instead.
+Use --log-dir <path> to set where log and pid files are written (default: /tmp).
+
 Also optionally configures VLC HTTP control by updating vlcrc.
 DOC
 
@@ -24,11 +27,6 @@ DESKTOP_DIR="${XDG_DATA_HOME}/applications"
 DESKTOP_FILE="${DESKTOP_DIR}/vlc-control.desktop"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  sed -n '1,/^DOC$/p' "$0" | sed '1d;$d'
-  exit 0
-fi
 
 say() { printf '%s\n' "$*"; }
 err() { printf '%s\n' "$*" >&2; }
@@ -133,7 +131,45 @@ abort_and_uninstall() {
   exit 1
 }
 
-cmd="${1:-install}"
+CUSTOM_PREFIX=""
+LOG_DIR_OVERRIDE=""
+cmd="install"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      sed -n '1,/^DOC$/p' "$0" | sed '1d;$d'
+      exit 0
+      ;;
+    --prefix)
+      shift
+      CUSTOM_PREFIX="${1:-}"
+      [[ -n "$CUSTOM_PREFIX" ]] || die "--prefix requires a path"
+      shift
+      ;;
+    --log-dir)
+      shift
+      LOG_DIR_OVERRIDE="${1:-}"
+      [[ -n "$LOG_DIR_OVERRIDE" ]] || die "--log-dir requires a path"
+      shift
+      ;;
+    install)   cmd="install"; shift ;;
+    uninstall) cmd="uninstall"; shift ;;
+    *) die "Unknown option: $1. Try: ./install.sh --help" ;;
+  esac
+done
+
+if [[ -n "$CUSTOM_PREFIX" ]]; then
+  mkdir -p "$CUSTOM_PREFIX" || die "Cannot create prefix directory: $CUSTOM_PREFIX"
+  CUSTOM_PREFIX="$(cd "$CUSTOM_PREFIX" && pwd)"
+  PREFIX="${CUSTOM_PREFIX}/share"
+  BIN_DIR="${CUSTOM_PREFIX}/bin"
+  CONFIG_DIR="${CUSTOM_PREFIX}/config"
+  DESKTOP_DIR="${CUSTOM_PREFIX}/applications"
+  DESKTOP_FILE="${DESKTOP_DIR}/vlc-control.desktop"
+  say "[*] Custom prefix: ${CUSTOM_PREFIX}"
+fi
+
 if [[ "$cmd" == "uninstall" ]]; then
   do_uninstall
   exit 0
@@ -417,6 +453,10 @@ fi
 
 set_env_kv "${DST_ENV}" "VLC_PASS" "${VLC_PASS_VALUE}"
 
+if [[ -n "${LOG_DIR_OVERRIDE}" ]]; then
+  set_env_kv "${DST_ENV}" "LOG_DIR" "${LOG_DIR_OVERRIDE}"
+fi
+
 vlc_write_cfg_kv() {
   local cfg="$1"
   local key="$2"
@@ -505,14 +545,24 @@ say "[*] Installing Python deps into venv (requirements.txt)"
 "${DST_VENV}/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true
 "${DST_VENV}/bin/python" -m pip install -r "${REPO_DIR}/requirements.txt"
 
-ln -sf "${PREFIX}/vlc-control" "${BIN_DIR}/vlc-control"
+if [[ -n "$CUSTOM_PREFIX" ]]; then
+  cat > "${BIN_DIR}/vlc-control" <<WRAPPER
+#!/usr/bin/env bash
+export VLC_CONTROL_PREFIX="${PREFIX}"
+export VLC_CONTROL_CONFIG_DIR="${CONFIG_DIR}"
+exec "${PREFIX}/vlc-control" "\$@"
+WRAPPER
+  chmod +x "${BIN_DIR}/vlc-control"
+else
+  ln -sf "${PREFIX}/vlc-control" "${BIN_DIR}/vlc-control"
+fi
 
 cat > "${DESKTOP_FILE}" <<EOF
 [Desktop Entry]
 Type=Application
 Name=VLC Control
 Comment=VLC bridge + share link
-Exec=/usr/bin/env bash -lc "$HOME/.local/bin/vlc-control"
+Exec=/usr/bin/env bash -lc "${BIN_DIR}/vlc-control"
 Icon=org.videolan.VLC
 Terminal=true
 Categories=AudioVideo;Player;
@@ -520,7 +570,11 @@ EOF
 
 say ""
 say "Done!"
-say "- Run:        vlc-control"
+if [[ -n "$CUSTOM_PREFIX" ]]; then
+  say "- Run:        ${BIN_DIR}/vlc-control"
+else
+  say "- Run:        vlc-control"
+fi
 say "- Config:     ${DST_ENV}"
 say "- Frontend:   ${PREFIX}/static/"
 say "- Uninstall:  ./install.sh uninstall"

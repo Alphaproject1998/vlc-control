@@ -114,6 +114,9 @@ load_env_file "$CFG_ENV" || {
 : "${VLC_MODE:=auto}"
 : "${START_VLC:=yes}"
 : "${CLOUDFLARE:=auto}"
+: "${LOG_DIR:=/tmp}"
+mkdir -p "${LOG_DIR}"
+LOG_DIR="$(cd "${LOG_DIR}" && pwd)"
 
 if [[ -n "${VLC_CONTROL_SEATS:-}" && -z "$SEATS_OVERRIDE" ]]; then
   SEATS_OVERRIDE="$VLC_CONTROL_SEATS"
@@ -140,7 +143,7 @@ export VLC_CONTROL_CONFIG_DIR="$CONFIG_DIR"
 VLC_URL="http://${VLC_HOST}:${VLC_PORT}"
 export VLC_URL VLC_PASS MAX_CLIENTS GRACE_SECONDS PORT
 
-PIDFILE="/tmp/vlc-control-bridge.pid"
+PIDFILE="${LOG_DIR}/vlc-control-bridge.pid"
 
 echo
 echo "Token:     $TOKEN"
@@ -208,14 +211,14 @@ start_vlc_if_needed() {
       --http-host "${VLC_HOST}" \
       --http-port "${VLC_PORT}" \
       --http-password "${VLC_PASS}" \
-      >/tmp/vlc-http.log 2>&1 &
+      >"${LOG_DIR}/vlc-http.log" 2>&1 &
   else
     vlc \
       --extraintf http \
       --http-host "${VLC_HOST}" \
       --http-port "${VLC_PORT}" \
       --http-password "${VLC_PASS}" \
-      >/tmp/vlc-http.log 2>&1 &
+      >"${LOG_DIR}/vlc-http.log" 2>&1 &
   fi
 
   for _ in {1..30}; do
@@ -226,7 +229,7 @@ start_vlc_if_needed() {
   if vlc_port_open; then
     echo "[*] VLC started and port is open."
   else
-    echo "[!] VLC did not open port ${VLC_PORT} yet. Check /tmp/vlc-http.log"
+    echo "[!] VLC did not open port ${VLC_PORT} yet. Check ${LOG_DIR}/vlc-http.log"
     return 1
   fi
 }
@@ -254,8 +257,8 @@ start_bridge() {
   # shellcheck disable=SC1090
   source "$PREFIX/.venv/bin/activate"
 
-  : > /tmp/vlc-bridge.log
-  python "$PREFIX/vlc-bridge.py" >>/tmp/vlc-bridge.log 2>&1 &
+  : > "${LOG_DIR}/vlc-bridge.log"
+  python "$PREFIX/vlc-bridge.py" >>"${LOG_DIR}/vlc-bridge.log" 2>&1 &
   BRIDGE_PID=$!
   echo "$BRIDGE_PID" > "$PIDFILE" || true
 
@@ -296,7 +299,7 @@ start_cloudflared() {
   if command -v curl >/dev/null 2>&1; then
     if ! curl -4 -fsS --max-time 1 "${ORIGIN_URL}/" >/dev/null 2>&1; then
       echo "[!] Local bridge is not reachable at ${ORIGIN_URL}/" >&2
-      echo "    Not starting Cloudflare tunnel. Check /tmp/vlc-bridge.log" >&2
+      echo "    Not starting Cloudflare tunnel. Check ${LOG_DIR}/vlc-bridge.log" >&2
       return 1
     fi
 
@@ -304,20 +307,20 @@ start_cloudflared() {
       local code
       code="$(curl -4 -s -o /dev/null -w "%{http_code}" --max-time 1 "${ORIGIN_URL}/api/clients?t=${TOKEN}&cid=probe" || true)"
       echo "[!] Bridge token check failed (HTTP ${code}) at ${ORIGIN_URL}/api/clients" >&2
-      echo "    TOKEN mismatch or bridge not fully ready. Check /tmp/vlc-bridge.log" >&2
+      echo "    TOKEN mismatch or bridge not fully ready. Check ${LOG_DIR}/vlc-bridge.log" >&2
       return 1
     fi
   fi
 
   echo "[*] Starting Cloudflare tunnel (quick tunnel)..."
-  : > /tmp/vlc-cloudflared.log
-  cloudflared tunnel --no-autoupdate --url "${ORIGIN_URL}" >>/tmp/vlc-cloudflared.log 2>&1 &
+  : > "${LOG_DIR}/vlc-cloudflared.log"
+  cloudflared tunnel --no-autoupdate --url "${ORIGIN_URL}" >>"${LOG_DIR}/vlc-cloudflared.log" 2>&1 &
   CF_PID=$!
   echo "[*] Tunnel PID: $CF_PID"
 
   PUBLIC_URL=""
   for _ in {1..80}; do
-    PUBLIC_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/vlc-cloudflared.log | tail -n 1 || true)"
+    PUBLIC_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "${LOG_DIR}/vlc-cloudflared.log" | tail -n 1 || true)"
     [[ -n "$PUBLIC_URL" ]] && break
     sleep 0.2
   done
@@ -339,17 +342,17 @@ start_cloudflared() {
     fi
   else
     echo "[!] Tunnel started but URL not found yet. Showing last 40 log lines:" >&2
-    tail -n 40 /tmp/vlc-cloudflared.log >&2 || true
+    tail -n 40 "${LOG_DIR}/vlc-cloudflared.log" >&2 || true
   fi
 }
 
-HOSTLOG_LOCK="/tmp/vlc-control-hostlog.lock"
-HOSTLOG_PIDFILE="/tmp/vlc-control-hostlog.pid"
+HOSTLOG_LOCK="${LOG_DIR}/vlc-control-hostlog.lock"
+HOSTLOG_PIDFILE="${LOG_DIR}/vlc-control-hostlog.pid"
 
 start_hostlog() {
   stop_hostlog
 
-  local awkfile="/tmp/vlc-hostlog.awk"
+  local awkfile="${LOG_DIR}/vlc-hostlog.awk"
   cat > "$awkfile" <<'AWK'
 function ts(){ cmd="date +\"%H:%M:%S\""; cmd|getline t; close(cmd); return t }
 $1!="EVENT"{ next }
@@ -389,10 +392,10 @@ $1!="EVENT"{ next }
 AWK
 
   if command -v setsid >/dev/null 2>&1; then
-    setsid bash -c "tail -n 0 -F /tmp/vlc-bridge.log 2>/dev/null | awk -f '$awkfile'" &
+    setsid bash -c "tail -n 0 -F \"${LOG_DIR}/vlc-bridge.log\" 2>/dev/null | awk -f \"$awkfile\"" &
     echo $! > "$HOSTLOG_PIDFILE"
   else
-    ( tail -n 0 -F /tmp/vlc-bridge.log 2>/dev/null | awk -f "$awkfile" ) &
+    ( tail -n 0 -F "${LOG_DIR}/vlc-bridge.log" 2>/dev/null | awk -f "$awkfile" ) &
     echo $! > "$HOSTLOG_PIDFILE"
   fi
 }
@@ -423,16 +426,16 @@ start_vlc_if_needed || true
 start_bridge
 start_hostlog
 
-echo "[*] PATH=$PATH" >>/tmp/vlc-cloudflared.log
-command -v cloudflared >>/tmp/vlc-cloudflared.log 2>&1 || echo "[!] cloudflared not in PATH" >>/tmp/vlc-cloudflared.log
+echo "[*] PATH=$PATH" >>"${LOG_DIR}/vlc-cloudflared.log"
+command -v cloudflared >>"${LOG_DIR}/vlc-cloudflared.log" 2>&1 || echo "[!] cloudflared not in PATH" >>"${LOG_DIR}/vlc-cloudflared.log"
 
 start_cloudflared
 
 echo
 echo "[OK] Running. Logs:"
-echo " - /tmp/vlc-bridge.log"
-echo " - /tmp/vlc-http.log"
-echo " - /tmp/vlc-cloudflared.log"
+echo " - ${LOG_DIR}/vlc-bridge.log"
+echo " - ${LOG_DIR}/vlc-http.log"
+echo " - ${LOG_DIR}/vlc-cloudflared.log"
 echo "Press Ctrl+C to stop."
 echo
 
