@@ -55,6 +55,7 @@
         <button id="btnNext">⏭️ <span>Next</span></button>
         <button id="btnBack">⟲ <span>-10s</span></button>
         <button id="btnFwd">⟳ <span>+10s</span></button>
+        <button id="btnPlaylist" style="grid-column: 1 / -1;">📜 <span>Playlist</span></button>
       </div>
 
       <div class="status">
@@ -65,6 +66,35 @@
       <div class="foot" id="footerText">Tip: keep the link private.</div>
     </div>
   </main>
+</div>
+
+<div class="modal-overlay" id="playlistModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="playlistModalTitle">
+    <div class="modal-header">
+      <h2 id="playlistModalTitle">Playlist</h2>
+      <button class="icon-btn" id="btnPlClose" aria-label="Close">✕</button>
+    </div>
+    <ul class="playlist-list" id="playlistItems"></ul>
+    <div class="playlist-empty" id="playlistEmpty">Playlist is empty.</div>
+    <div id="playlistModalFooter" class="modal-footer">
+      <button class="danger" id="btnPlClear">Clear playlist</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="resumeModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="resumeModalTitle">
+    <div class="modal-header">
+      <h2 id="resumeModalTitle">Resume playback?</h2>
+      <button class="icon-btn" id="btnResumeClose" aria-label="Close">✕</button>
+    </div>
+    <div id="resumeBody" class="resume-body"></div>
+    <div class="modal-footer">
+      <button id="btnResumeCancel">Cancel</button>
+      <button id="btnResumeRestart">Start over</button>
+      <button class="primary" id="btnResumeContinue">Resume</button>
+    </div>
+  </div>
 </div>
 
 <script src="app.js" defer></script>

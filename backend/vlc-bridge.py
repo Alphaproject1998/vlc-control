@@ -232,14 +232,76 @@ def read_status_dict() -> dict:
         "length": length_s,
         "progress": position,
         "position": position,
+        "loop": bool(data.get("loop")),
+        "repeat": bool(data.get("repeat")),
+        "random": bool(data.get("random")),
     }
 
 
+def read_playlist() -> list[dict]:
+    r = vlc_get("/requests/playlist.json")
+    data = r.json()
+
+    def _walk(node) -> list[dict]:
+        out: list[dict] = []
+        if not isinstance(node, dict):
+            return out
+        if node.get("type") == "leaf":
+            out.append({
+                "id": str(node.get("id") or ""),
+                "name": node.get("name") or "",
+                "uri": node.get("uri") or "",
+                "duration": int(node.get("duration") or 0),
+                "isCurrent": node.get("current") == "current",
+            })
+            return out
+        for child in node.get("children") or []:
+            out.extend(_walk(child))
+        return out
+
+    children = data.get("children") or []
+    for top in children:
+        if (top.get("name") or "").lower() == "playlist":
+            return _walk(top)
+    items: list[dict] = []
+    for top in children:
+        items.extend(_walk(top))
+    return items
+
+
+_session_progress: dict[str, dict] = {}
+
+
+def _update_session_progress(status: dict, items: list[dict]) -> None:
+    state = (status.get("state") or "").lower()
+    if state not in ("playing", "paused"):
+        return
+    current = next((it for it in items if it.get("isCurrent")), None)
+    if not current:
+        return
+    uri = current.get("uri") or ""
+    if not uri:
+        return
+    _session_progress[uri] = {
+        "watched": int(status.get("time") or 0),
+        "duration": int(status.get("length") or 0),
+    }
+
+
+def _apply_progress(items: list[dict]) -> list[dict]:
+    for item in items:
+        uri = item.get("uri") or ""
+        if uri and uri in _session_progress:
+            item["progress"] = dict(_session_progress[uri])
+    return items
+
+
 _last_seen: dict | None = None
+_last_playlist_json: str | None = None
 
 
 def broadcaster_loop() -> None:
-    global _last_seen
+    global _last_seen, _last_playlist_json
 
     while True:
         time.sleep(0.75)
@@ -252,10 +314,11 @@ def broadcaster_loop() -> None:
         if not all_ws:
             continue
 
+        status: dict | None = None
         try:
             status = read_status_dict()
 
-            if _last_seen is not None and not api_action_recent():
+            if _last_seen is not None and not api_action_recent(1.0):
                 prev_state = (_last_seen.get("state") or "unknown")
                 new_state = (status.get("state") or "unknown")
                 if new_state != prev_state:
@@ -288,12 +351,31 @@ def broadcaster_loop() -> None:
                     "length": 0,
                     "progress": 0.0,
                     "position": 0.0,
+                    "loop": False,
+                    "repeat": False,
+                    "random": False,
                 },
             })
+
+        playlist_payload: str | None = None
+        try:
+            pl = read_playlist()
+            if status is not None:
+                _update_session_progress(status, pl)
+            pl = _apply_progress(pl)
+            pl_json = json.dumps(pl, sort_keys=True)
+            if pl_json != _last_playlist_json:
+                _last_playlist_json = pl_json
+                playlist_payload = json.dumps({"type": "playlist", "data": pl})
+        except Exception:
+            pass
 
         dead = []
         for ws in all_ws:
             if not _ws_send_safe(ws, payload):
+                dead.append(ws)
+                continue
+            if playlist_payload and not _ws_send_safe(ws, playlist_payload):
                 dead.append(ws)
 
         if dead:
@@ -411,6 +493,125 @@ def status():
     return jsonify(read_status_dict())
 
 
+def _playlist_name_for_id(items: list[dict], pid: str) -> str:
+    for it in items:
+        if it.get("id") == pid:
+            return it.get("name") or ""
+    return ""
+
+
+@app.get("/api/playlist")
+def playlist():
+    require_token()
+    require_sid()
+    return jsonify(_apply_progress(read_playlist()))
+
+
+@app.get("/api/playlist/play")
+def playlist_play():
+    require_token()
+    _, cid = require_sid()
+
+    pid = request.args.get("id", "").strip()
+    if not pid:
+        abort(400, "Missing id")
+
+    resume_at_raw = request.args.get("resume_at", "").strip()
+    resume_at = 0
+    if resume_at_raw:
+        try:
+            resume_at = max(0, int(resume_at_raw))
+        except ValueError:
+            abort(400, "Invalid resume_at")
+
+    name = ""
+    total = 0
+    try:
+        for it in read_playlist():
+            if it.get("id") == pid:
+                name = it.get("name") or ""
+                total = int(it.get("duration") or 0)
+                break
+    except Exception:
+        pass
+
+    mark_api_action("playlist_resume" if resume_at > 0 else "playlist_skip", cid=cid, value=pid)
+    vlc_get("/requests/status.xml", params={"command": "pl_play", "id": pid})
+    if resume_at > 0:
+        time.sleep(0.25)
+        vlc_get("/requests/status.xml", params={"command": "seek", "val": str(resume_at)})
+        mark_api_action("playlist_resume", cid=cid, value=f"{pid}@{resume_at}")
+        at_s = fmt_time(resume_at)
+        len_s = fmt_time(total) if total > 0 else "?"
+        log_event("action", who="web", cid=cid, op="playlist_resume",
+                  at=at_s, length=len_s, value=f"{(name or pid)} - {at_s} / {len_s}")
+    else:
+        log_event("action", who="web", cid=cid, op="playlist_skip", value=(name or pid))
+    return "ok"
+
+
+@app.get("/api/playlist/remove")
+def playlist_remove():
+    require_token()
+    _, cid = require_sid()
+
+    pid = request.args.get("id", "").strip()
+    if not pid:
+        abort(400, "Missing id")
+
+    name = ""
+    try:
+        name = _playlist_name_for_id(read_playlist(), pid)
+    except Exception:
+        pass
+
+    vlc_get("/requests/status.xml", params={"command": "pl_delete", "id": pid})
+    mark_api_action("playlist_remove", cid=cid, value=pid)
+    log_event("action", who="web", cid=cid, op="playlist_remove", value=(name or pid))
+    return "ok"
+
+
+@app.get("/api/playlist/clear")
+def playlist_clear():
+    require_token()
+    _, cid = require_sid()
+
+    vlc_get("/requests/status.xml", params={"command": "pl_empty"})
+    mark_api_action("playlist_clear", cid=cid)
+    log_event("action", who="web", cid=cid, op="playlist_clear")
+    return "ok"
+
+
+@app.get("/api/playlist/add")
+def playlist_add():
+    require_token()
+    _, cid = require_sid()
+
+    uri = request.args.get("uri", "").strip()
+    if not uri:
+        abort(400, "Missing uri")
+
+    vlc_get("/requests/status.xml", params={"command": "in_enqueue", "input": uri})
+    mark_api_action("playlist_add", cid=cid, value=uri)
+    log_event("action", who="web", cid=cid, op="playlist_add", value=uri)
+    return "ok"
+
+
+@app.get("/api/playlist/playnow")
+def playlist_playnow():
+    require_token()
+    _, cid = require_sid()
+
+    uri = request.args.get("uri", "").strip()
+    if not uri:
+        abort(400, "Missing uri")
+
+    vlc_get("/requests/status.xml", params={"command": "in_play", "input": uri})
+    mark_api_action("playlist_playnow", cid=cid, value=uri)
+    log_event("action", who="web", cid=cid, op="playlist_playnow", value=uri)
+    return "ok"
+
+
 @app.get("/api/clients")
 def clients():
     require_token()
@@ -499,6 +700,10 @@ def ws_route(ws):
             }
         }))
         ws.send(json.dumps({"type": "status", "data": read_status_dict()}))
+        try:
+            ws.send(json.dumps({"type": "playlist", "data": _apply_progress(read_playlist())}))
+        except Exception:
+            pass
     except Exception:
         pass
 

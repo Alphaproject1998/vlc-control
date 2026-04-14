@@ -28,22 +28,35 @@
     "showButtons": true,
     "showIcons": true,
     "showSystemStatus": true,
-    "showFooter": true
+    "showFooter": true,
+    "showPlaylist": true,
+    "showPlaylistPrevNext": true,
+    "showPlaylistProgressEntries": true,
+    "showPlaylistProgressTime": true
   },
   "buttons": {
     "playPause": true,
     "stop": true,
     "previous": true,
     "next": true,
-    "seekJumps": true
+    "seekJumps": true,
+    "playlist": true,
+    "clearPlaylist": true,
+    "removeTrack": true
   },
   "features": {
     "allowSeeking": true,
     "keyboardEvents": true,
-    "updateTabTitle": true
+    "updateTabTitle": true,
+    "playlistControl": true,
+    "resumePrompt": true
   },
   "config": {
     "seekJumpBy": 10,
+    "resumeMinPercent": 5,
+    "resumeMinSeconds": 10,
+    "resumeMaxPercent": 95,
+    "resumeTailSeconds": 300,
     "clockShowRemaining": false
   }
 }

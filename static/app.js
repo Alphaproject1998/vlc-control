@@ -6,7 +6,7 @@
  * - realtime VLC status via WebSocket
  * - control commands via HTTP endpoints
  */
-
+//TODO: Need to optimize dom manipulation only update what needs to and make javascript similar so that less is passively happening when it doesn't need to.
 window.uiConfig = window.uiConfig || {
     title: "VLC Control",
     subtitle: "Realtime now-playing + scrub seek",
@@ -23,14 +23,42 @@ window.uiConfig = window.uiConfig || {
         showClients: true,
         showWSStatus: true,
         showButtons: true,
-        showIcons: true,
+        showIcons: true, //TODO: needs applying to playlist modal.
         showSystemStatus: true,
-        showFooter: true
+        showFooter: true,
+        showPlaylist: true,
+        showPlaylistPrevNext: true,
+        showPlaylistProgressEntries: true,
+        showPlaylistProgressTime: true
     },
-    buttons: { playPause: true, stop: true, previous: true, next: true, seekJumps: true },
-    features: { allowSeeking: true, keyboardEvents: true, updateTabTitle: true },
-    config: { seekJumpBy: 10, clockShowRemaining: false }
+    buttons: {
+        playPause: true,
+        stop: true,
+        previous: true,
+        next: true,
+        seekJumps: true,
+        playlist: true,
+        clearPlaylist: true,
+        removeTrack: true
+    },
+    features: {
+        allowSeeking: true,
+        keyboardEvents: true,
+        updateTabTitle: true,
+        playlistControl: true,
+        resumePrompt: true
+    },
+    config: {
+        seekJumpBy: 10,
+        clockShowRemaining: false,
+        resumeMinPercent: 5,
+        resumeMinSeconds: 10,
+        resumeMaxPercent: 95,
+        resumeTailSeconds: 300
+    }
 };
+//TODO: showPlaylistPrevNext, showPlaylistProgressEntries, showPlaylistProgressTime, playlistControl.
+//TODO: add a chip to use with showPlaylistProgressEntries on main ui.
 
 function getUiConfigSafe(){
     return (typeof window !== "undefined" && window.uiConfig) ? window.uiConfig : {};
@@ -144,6 +172,12 @@ function applyUiConfigToDom(){
     const seekJumps = !(btns.seekJumps === false);
     setBtn("btnBack", seekJumps);
     setBtn("btnFwd",  seekJumps);
+    const showPlaylist = !(layout.showPlaylist === false) && !(btns.playlist === false);
+    setBtn("btnPlaylist", showPlaylist);
+    const playlistModalFooter = document.getElementById("playlistModalFooter");
+    const clearBtn = document.getElementById("btnPlClear");
+    if (clearBtn) clearBtn.style.display = (btns.clearPlaylist === false) ? "none" : "";
+    if (playlistModalFooter) playlistModalFooter.style.display = (btns.clearPlaylist === false) ? "none" : "";
 
     const jump = getSeekJumpBy();
     const lb = document.getElementById("lblBack");
@@ -205,6 +239,10 @@ function setUiBusy(on, label){
         if (!el) continue;
         el.disabled = !!on;
     }
+
+    document.querySelectorAll(".modal button").forEach(btn => { btn.disabled = !!on; });
+    const plModal = document.getElementById("playlistModal");
+    if (plModal) plModal.classList.toggle("busy", !!on);
 
     const outEl = document.getElementById("out");
     const pillEl = document.getElementById("pill");
@@ -411,6 +449,10 @@ function lockUI(reason, cooldownSec=0){
     setBusy(true);
     if (progress) progress.disabled = true;
 
+    closePlaylist();
+    const plm = document.getElementById("playlistModal");
+    if (plm) plm.classList.add("busy");
+
     dragging = false;
     seekTargetSec = null;
     if (preview) preview.classList.remove("show");
@@ -450,11 +492,15 @@ function unlockUI(){
     if (out) out.textContent = "Admitted";
     setPill("ok", "OK");
     if (wsEl) wsEl.textContent = "ws: connected";
+    const plm = document.getElementById("playlistModal");
+    if (plm) plm.classList.remove("busy");
     updatePlayPauseButtonFromState((lastStatus && lastStatus.state) || "unknown");
 }
 
 function applyStatus(s){
+    const prevState = (lastStatus && lastStatus.state) || "";
     lastStatus = s || lastStatus;
+    const newState = (lastStatus && lastStatus.state) || "";
 
     const mediaTitle = (lastStatus.title && String(lastStatus.title).trim()) ? String(lastStatus.title).trim() : "Nothing playing";
     if (titleEl) titleEl.textContent = mediaTitle;
@@ -473,6 +519,9 @@ function applyStatus(s){
         const p = Math.max(0, Math.min(1, Number(lastStatus.progress || 0)));
         progress.value = String(Math.round(p * 1000));
     }
+
+    updatePrevNextHints();
+    if (newState !== prevState) renderPlaylist();
 }
 
 function setPreviewFromSlider(){
@@ -581,6 +630,7 @@ const btnNext = document.getElementById("btnNext");
 const btnStop = document.getElementById("btnStop");
 const btnBack = document.getElementById("btnBack");
 const btnFwd  = document.getElementById("btnFwd");
+const btnPlaylist = document.getElementById("btnPlaylist");
 
 if (btnToggle) btnToggle.addEventListener("click", () => hit("toggle"));
 if (btnPrev)   btnPrev.addEventListener("click", () => hit("prev"));
@@ -589,6 +639,291 @@ if (btnStop)   btnStop.addEventListener("click", () => hit("stop"));
 
 if (btnBack) btnBack.addEventListener("click", () => seekBy(-getSeekJumpBy()));
 if (btnFwd)  btnFwd.addEventListener("click", () => seekBy(getSeekJumpBy()));
+
+//TODO: Improve modal display, fade/animation?
+//TODO: Global modal handler.
+let playlistItems = [];
+const playlistModal = document.getElementById("playlistModal");
+const playlistItemsEl = document.getElementById("playlistItems");
+const playlistEmptyEl = document.getElementById("playlistEmpty");
+const btnPlClose = document.getElementById("btnPlClose");
+const btnPlClear = document.getElementById("btnPlClear");
+
+function openPlaylist() {
+    if(!playlistModal) return;
+    playlistModal.hidden = false;
+}
+function closePlaylist() {
+    if(!playlistModal) return;
+    playlistModal.hidden = true;
+}
+function isPlaylistOpen(){ return playlistModal && !playlistModal.hidden; }
+
+function updatePrevNextHints() {
+    const n = playlistItems.length;
+    const idx = playlistItems.findIndex(it => it.isCurrent);
+    const random = !!(window.__lastStatus && window.__lastStatus.random);
+
+    if (n === 0 || idx < 0){
+        btnPrev.title = "Previous";
+        btnNext.title = "Next";
+        return;
+    }
+
+    if (random){
+        btnPrev.title = "Previous: (random)";
+        btnNext.title = "Next: (random)";
+        return;
+    }
+
+    const prevItem = (idx === 0) ? playlistItems[n - 1] : playlistItems[idx - 1];
+    const nextItem = (idx === n - 1) ? playlistItems[0] : playlistItems[idx + 1];
+    const prevWraps = (idx === 0);
+    const nextWraps = (idx === n - 1);
+
+    btnPrev.title = `Previous: ${prevItem.name}${prevWraps ? " (wrap to end)" : ""}`;
+    btnNext.title = `Next: ${nextItem.name}${nextWraps ? " (wrap to start)" : ""}`;
+}
+
+function renderPlaylist(){
+    if(!playlistItemsEl || !playlistEmptyEl) return;
+
+    const cfg = getUiConfigSafe();
+    const btns = cfg.buttons || {};
+    const showRemove = !(btns.removeTrack === false);
+
+    playlistItemsEl.innerHTML = "";
+    if (!playlistItems.length){
+        playlistEmptyEl.style.display = "";
+        playlistItemsEl.style.display = "none";
+        updatePrevNextHints();
+        return;
+    }
+    playlistEmptyEl.style.display = "none";
+    playlistItemsEl.style.display = "";
+
+    const playbackState = String((window.__lastStatus && window.__lastStatus.state) || "").toLowerCase();
+
+    for (const item of playlistItems){
+        const li = document.createElement("li");
+        let cls = "playlist-item";
+        let indicator = "";
+        let isActiveRow = false;
+        let iconAction = null;
+
+        if (item.isCurrent){
+            if (playbackState === "playing"){
+                cls += " current";
+                indicator = "▶️";
+                isActiveRow = true;
+                iconAction = "toggle";
+            } else if (playbackState === "paused"){
+                cls += " current";
+                indicator = "⏸️";
+                isActiveRow = true;
+                iconAction = "toggle";
+            } else {
+                cls += " last-played";
+                indicator = "⏹️";
+                iconAction = "resume";
+            }
+        }
+
+        li.className = cls;
+        li.dataset.id = item.id;
+
+        let ind;
+        if (iconAction){
+            ind = document.createElement("button");
+            ind.type = "button";
+            ind.setAttribute("aria-label", iconAction === "toggle" ? "Play / pause" : "Resume track");
+        } else {
+            ind = document.createElement("span");
+        }
+        ind.className = "pl-indicator";
+        ind.textContent = indicator;
+        if (iconAction === "toggle"){
+            ind.addEventListener("click", (e) => {
+                e.stopPropagation();
+                hit("toggle");
+            });
+        } else if (iconAction === "resume"){
+            ind.addEventListener("click", (e) => {
+                e.stopPropagation();
+                requestPlaylistPlay(item);
+            });
+        }
+        li.appendChild(ind);
+
+        const name = document.createElement("span");
+        name.className = "pl-name";
+        name.textContent = item.name || item.uri || "(untitled)";
+        li.appendChild(name);
+
+        if(item.duration > 0 || item.progress){
+            const dur = document.createElement("span");
+            dur.className = "pl-duration"; //TODO: maybe add similar clock toggle that main ui has to playlist clocks. Or some way to see time left.
+            const total = (item.progress && item.progress.duration > 0)
+                ? item.progress.duration
+                : item.duration;
+            if (item.progress && typeof item.progress.watched === "number" && total > 0){
+                dur.textContent = `${fmtTime(item.progress.watched)} / ${fmtTime(total)}`;
+            } else if(total > 0){
+                dur.textContent = fmtTime(total);
+            }
+            li.appendChild(dur);
+        }
+
+        if (showRemove){
+            const rm = document.createElement("button");
+            rm.className = "pl-remove";
+            rm.type = "button";
+            rm.setAttribute("aria-label", "Remove from playlist");
+            rm.textContent = "✕";
+            rm.addEventListener("click", (e) => {
+                e.stopPropagation();
+                playlistRemove(item.id);
+            });
+            li.appendChild(rm);
+        }
+
+        if (!isActiveRow){
+            li.addEventListener("click", () => requestPlaylistPlay(item));
+        }
+
+        playlistItemsEl.appendChild(li);
+    }
+
+    updatePrevNextHints();
+}
+
+function isSignificantProgress(item){
+    if(!item || !item.progress) return false;
+    const cfg = getUiConfigSafe().config || {};
+    const watched = Number(item.progress.watched) || 0;
+    const duration = Number(item.progress.duration) || Number(item.duration) || 0;
+    if(duration <= 0 || watched <= 0) return false;
+    const minPct  = Number(cfg.resumeMinPercent ?? 5);
+    const minSec  = Number(cfg.resumeMinSeconds ?? 10);
+    const maxPct  = Number(cfg.resumeMaxPercent ?? 95);
+    const tailSec = Number(cfg.resumeTailSeconds ?? 300);
+    const floor = Math.max(duration * minPct / 100, minSec);
+    const ceil  = Math.min(duration * maxPct / 100, duration - tailSec);
+    return watched > floor && watched < ceil;
+}
+
+const resumeModal = document.getElementById("resumeModal");
+const resumeBody = document.getElementById("resumeBody");
+const btnResumeClose = document.getElementById("btnResumeClose");
+const btnResumeCancel = document.getElementById("btnResumeCancel");
+const btnResumeRestart = document.getElementById("btnResumeRestart");
+const btnResumeContinue = document.getElementById("btnResumeContinue");
+let resumeResolver = null;
+
+function openResumeModal(item){
+    const watched = Math.max(0, Math.floor(Number(item.progress.watched) || 0));
+    const total = Math.max(0, Math.floor(Number(item.progress.duration) || Number(item.duration) || 0));
+    resumeBody.innerHTML = "";
+    const nameEl = document.createElement("div");
+    nameEl.className = "resume-name";
+    nameEl.textContent = item.name || item.uri || "(untitled)";
+    const msg = document.createElement("div");
+    msg.textContent = total > 0
+        ? `Last position: ${fmtTime(watched)} of ${fmtTime(total)}.`
+        : `Last position: ${fmtTime(watched)}.`;
+    resumeBody.appendChild(nameEl);
+    resumeBody.appendChild(msg);
+    resumeModal.hidden = false;
+    return new Promise((resolve) => { resumeResolver = resolve; });
+}
+
+function closeResumeModal(choice){
+    resumeModal.hidden = true;
+    const r = resumeResolver;
+    resumeResolver = null;
+    if(r) r(choice);
+}
+
+function isResumeOpen(){ return resumeModal && !resumeModal.hidden; }
+
+btnResumeClose.addEventListener("click", () => closeResumeModal("cancel"));
+btnResumeCancel.addEventListener("click", () => closeResumeModal("cancel"));
+btnResumeRestart.addEventListener("click", () => closeResumeModal("restart"));
+btnResumeContinue.addEventListener("click", () => closeResumeModal("resume"));
+resumeModal.addEventListener("click", (e) => {
+    if(e.target === resumeModal) closeResumeModal("cancel");
+});
+
+async function requestPlaylistPlay(item){
+    if(!sid || !item) return;
+    const features = getUiConfigSafe().features || {};
+    if(features.resumePrompt !== false && isSignificantProgress(item)){
+        const choice = await openResumeModal(item);
+        if(choice === "cancel") return;
+        if(choice === "resume"){
+            await playlistPlay(item.id, Math.floor(Number(item.progress.watched) || 0));
+            return;
+        }
+    }
+    await playlistPlay(item.id);
+}
+
+async function playlistPlay(id, resumeAt){
+    if(!sid) return;
+    setUiBusy(true, "Sending…");
+    try{
+        let url = `/api/playlist/play?id=${encodeURIComponent(id)}`;
+        if(Number.isFinite(resumeAt) && resumeAt > 0){
+            url += `&resume_at=${encodeURIComponent(Math.floor(resumeAt))}`;
+        }
+        await apiGet(url);
+        closePlaylist();
+    }catch(e){
+        console.error("playlist play failed", e);
+    }finally{
+        setUiBusy(false);
+    }
+}
+
+async function playlistRemove(id){
+    if(!sid) return;
+    try{
+        await apiGet(`/api/playlist/remove?id=${encodeURIComponent(id)}`);
+    }catch(e){
+        console.error("playlist remove failed", e);
+    }
+}
+
+async function playlistClear() {
+    if(!sid) return;
+    if (!confirm("Clear the entire playlist?")) return;
+    setUiBusy(true, "Sending…");
+    try{
+        await apiGet("/api/playlist/clear");
+    }catch(e){
+        console.error("playlist clear failed", e);
+    }finally{
+        setUiBusy(false);
+    }
+}
+
+if(btnPlaylist) btnPlaylist.addEventListener("click", openPlaylist);
+if(btnPlClose) btnPlClose.addEventListener("click", closePlaylist);
+if(btnPlClear) btnPlClear.addEventListener("click", playlistClear);
+if(playlistModal){
+    playlistModal.addEventListener("click", (e) => {
+        if(e.target === playlistModal) closePlaylist();
+    });
+}
+document.addEventListener("keydown", (e) => {
+    if (isResumeOpen()){
+        if (e.key === "Escape"){ e.preventDefault(); closeResumeModal("cancel"); return; }
+        if (e.key === "Enter"){ e.preventDefault(); closeResumeModal("resume"); return; }
+        if (e.key === "Backspace"){ e.preventDefault(); closeResumeModal("restart"); return; }
+        return;
+    }
+    if (e.key === "Escape" && isPlaylistOpen()) closePlaylist();
+});
 
 async function fetchClients(){
     try{
@@ -687,6 +1022,12 @@ function connectWS(){
                 window.__lastStatus = msg.data;
                 if (sid) applyStatus(msg.data || {});
             }
+
+            if (msg.type === "playlist"){
+                playlistItems = Array.isArray(msg.data) ? msg.data : [];
+                window.__playlist = playlistItems;
+                renderPlaylist();
+            }
         }catch{}
     };
 }
@@ -732,6 +1073,14 @@ function setupKeyboardShortcuts(){
         }
         if (key === "p" || key === "P"){
             if (btnPrev && btnPrev.style.display !== "none") btnPrev.click();
+            return;
+        }
+        if (key === "q" || key === "Q"){
+            if (isResumeOpen()) return;
+            const playlistAllowed = !(feat.playlistControl === false) && !(btns.playlist === false);
+            if (!playlistAllowed) return;
+            e.preventDefault(); e.stopPropagation();
+            if (isPlaylistOpen()) closePlaylist(); else openPlaylist();
             return;
         }
 
