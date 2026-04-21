@@ -355,18 +355,116 @@ cp -a "${REPO_DIR}/static/." "${PREFIX}/static/"
 
 mkdir -p "${CONFIG_DIR}"
 
+merge_env_defaults() {
+  local src="$1"
+  local dst="$2"
+  [[ -f "$src" && -f "$dst" ]] || { echo 0; return 0; }
+
+  python3 - "$src" "$dst" <<'PY'
+import sys, re, pathlib
+
+src = pathlib.Path(sys.argv[1])
+dst = pathlib.Path(sys.argv[2])
+
+key_pat = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+dst_text = dst.read_text(encoding="utf-8")
+dst_keys = set()
+for line in dst_text.splitlines():
+    m = key_pat.match(line)
+    if m:
+        dst_keys.add(m.group(1))
+
+added = []
+pending = []
+for line in src.read_text(encoding="utf-8").splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        pending.append(line)
+        continue
+    m = key_pat.match(line)
+    if not m:
+        pending = []
+        continue
+    key = m.group(1)
+    if key in dst_keys:
+        pending = []
+        continue
+    added.extend(pending)
+    added.append(line)
+    pending = []
+
+count = sum(1 for l in added if key_pat.match(l))
+if count:
+    if not dst_text.endswith("\n"):
+        dst_text += "\n"
+    if not dst_text.endswith("\n\n"):
+        dst_text += "\n"
+    dst_text += "\n".join(added) + "\n"
+    dst.write_text(dst_text, encoding="utf-8")
+
+print(count)
+PY
+}
+
 if [[ ! -f "${DST_ENV}" ]]; then
   cp -f "${REPO_DIR}/config/config.env.template" "${DST_ENV}"
   say "[*] Created ${DST_ENV}"
 else
   say "[*] Keeping existing ${DST_ENV}"
+  ENV_ADDED="$(merge_env_defaults "${REPO_DIR}/config/config.env.template" "${DST_ENV}")"
+  if [[ -n "${ENV_ADDED}" && "${ENV_ADDED}" -gt 0 ]]; then
+    say "[*] Added ${ENV_ADDED} new key(s) from template to ${DST_ENV}"
+  fi
 fi
+
+merge_json_defaults() {
+  local src="$1"
+  local dst="$2"
+  [[ -f "$src" && -f "$dst" ]] || { echo 0; return 0; }
+
+  python3 - "$src" "$dst" <<'PY'
+import sys, json, pathlib
+
+src = pathlib.Path(sys.argv[1])
+dst = pathlib.Path(sys.argv[2])
+
+try:
+    src_obj = json.loads(src.read_text(encoding="utf-8"))
+    dst_obj = json.loads(dst.read_text(encoding="utf-8"))
+except Exception:
+    print(0)
+    sys.exit(0)
+
+def merge(s, d):
+    if not isinstance(s, dict) or not isinstance(d, dict):
+        return 0
+    n = 0
+    for k, v in s.items():
+        if k not in d:
+            d[k] = v
+            n += 1
+        elif isinstance(v, dict) and isinstance(d[k], dict):
+            n += merge(v, d[k])
+    return n
+
+added = merge(src_obj, dst_obj)
+if added:
+    dst.write_text(json.dumps(dst_obj, indent=2) + "\n", encoding="utf-8")
+
+print(added)
+PY
+}
 
 if [[ ! -f "${DST_FRONTEND}" ]]; then
   cp -f "${REPO_DIR}/config/frontend.json.template" "${DST_FRONTEND}"
   say "[*] Created ${DST_FRONTEND}"
 else
   say "[*] Keeping existing ${DST_FRONTEND}"
+  FE_ADDED="$(merge_json_defaults "${REPO_DIR}/config/frontend.json.template" "${DST_FRONTEND}")"
+  if [[ -n "${FE_ADDED}" && "${FE_ADDED}" -gt 0 ]]; then
+    say "[*] Added ${FE_ADDED} new key(s) from template to ${DST_FRONTEND}"
+  fi
 fi
 
 ln -sf "${DST_FRONTEND}" "${PREFIX}/static/frontend.json"

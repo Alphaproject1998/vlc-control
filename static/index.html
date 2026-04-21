@@ -39,6 +39,7 @@
             <div class="chips">
               <span class="chip" id="state">state: locked</span>
               <span class="chip" id="clock" title="Click to toggle remaining time" style="cursor:pointer;">0:00 / 0:00</span>
+              <span class="chip" id="playlistCountChip" title="0 in playlist" style="cursor:pointer;" hidden>0</span>
             </div>
             <div class="chips">
               <span class="chip" id="clients">clients: ?/?</span>
@@ -77,8 +78,24 @@
     <ul class="playlist-list" id="playlistItems"></ul>
     <div class="playlist-empty" id="playlistEmpty">Playlist is empty.</div>
     <div id="playlistModalFooter" class="modal-footer">
+      <button id="btnPlAddFiles">➕ <span>Add files</span></button>
       <button class="danger" id="btnPlClear">Clear playlist</button>
     </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="fileBrowserModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="fileBrowserTitle">
+    <div class="modal-header">
+      <h2 id="fileBrowserTitle">Add files</h2>
+      <button class="icon-btn" id="btnFbClose" aria-label="Close">✕</button>
+    </div>
+    <div class="fb-toolbar">
+      <div class="fb-crumbs" id="fbCrumbs"></div>
+      <input type="search" class="fb-search" id="fbSearch" placeholder="Filter…" autocomplete="off" />
+    </div>
+    <ul class="playlist-list fb-list" id="fbItems"></ul>
+    <div class="playlist-empty" id="fbEmpty">Nothing here.</div>
   </div>
 </div>
 
@@ -96,6 +113,8 @@
     </div>
   </div>
 </div>
+
+<div id="toastHost" class="toast-host" aria-live="polite"></div>
 
 <script src="app.js" defer></script>
 </body>

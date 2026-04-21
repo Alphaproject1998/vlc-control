@@ -8,6 +8,7 @@ import json
 import threading
 import requests
 import secrets
+from urllib.parse import quote, unquote, urlparse
 
 VLC_URL = os.environ.get("VLC_URL", "http://127.0.0.1:8080")
 VLC_PASS = os.environ.get("VLC_PASS", "")
@@ -15,6 +16,89 @@ TOKEN = os.environ.get("TOKEN", "")
 
 MAX_CLIENTS = int(os.environ.get("MAX_CLIENTS", "2"))
 GRACE_SECONDS = float(os.environ.get("GRACE_SECONDS", "30"))
+
+
+def _env_flag(name: str, default: str) -> bool:
+    return (os.environ.get(name, default) or default).strip().lower() in ("on", "yes", "true", "1")
+
+
+FILE_BROWSE = _env_flag("FILE_BROWSE", "off")
+FILE_BROWSE_AUTO = _env_flag("FILE_BROWSE_AUTO", "yes")
+FILE_BROWSE_AUTO_RECURSIVE = _env_flag("FILE_BROWSE_AUTO_RECURSIVE", "no")
+
+_DEFAULT_EXTS = "mp4,mkv,avi,mov,webm,mp3,flac,ogg,m4a,opus,wav"
+FILE_BROWSE_EXTENSIONS: set[str] = {
+    e.strip().lower().lstrip(".")
+    for e in (os.environ.get("FILE_BROWSE_EXTENSIONS") or _DEFAULT_EXTS).split(",")
+    if e.strip()
+}
+
+
+def _parse_file_roots() -> list[tuple[str, str, bool]]:
+    raw = os.environ.get("FILE_BROWSE_DIRS", "") or ""
+    out: list[tuple[str, str, bool]] = []
+    seen: set[str] = set()
+    for entry in raw.split(":"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        recursive = False
+        if entry.endswith("/*"):
+            entry = entry[:-2]
+            recursive = True
+        real = os.path.realpath(os.path.expanduser(entry))
+        if not os.path.isdir(real) or real in seen:
+            continue
+        seen.add(real)
+        label = os.path.basename(real) or real
+        out.append((label, real, recursive))
+    return out
+
+
+_FILE_ROOTS: list[tuple[str, str, bool]] = _parse_file_roots()
+
+
+def _parse_blacklist_dirs() -> list[list[str]]:
+    raw = os.environ.get("FILE_BROWSE_BLACKLIST_DIRS", "") or ""
+    out: list[list[str]] = []
+    for entry in raw.split(":"):
+        entry = entry.strip().strip("/").lower()
+        if not entry:
+            continue
+        parts = [s for s in entry.split("/") if s]
+        if parts:
+            out.append(parts)
+    return out
+
+
+def _parse_blacklist_terms() -> list[str]:
+    raw = os.environ.get("FILE_BROWSE_BLACKLIST_TERMS", "") or ""
+    return [t.strip().lower() for t in raw.split(",") if t.strip()]
+
+
+_FILE_BLACKLIST_DIR_PATTERNS: list[list[str]] = _parse_blacklist_dirs()
+_FILE_BLACKLIST_TERMS: list[str] = _parse_blacklist_terms()
+
+
+def _is_blacklisted_term(name: str) -> bool:
+    if not _FILE_BLACKLIST_TERMS:
+        return False
+    lo = name.lower()
+    return any(t in lo for t in _FILE_BLACKLIST_TERMS)
+
+
+def _is_blacklisted_dir_path(rel_parts: list[str]) -> bool:
+    # rel_parts are already lowercased path components (no leading/trailing slashes)
+    if not _FILE_BLACKLIST_DIR_PATTERNS or not rel_parts:
+        return False
+    for pat in _FILE_BLACKLIST_DIR_PATTERNS:
+        n = len(pat)
+        if n > len(rel_parts):
+            continue
+        for i in range(0, len(rel_parts) - n + 1):
+            if rel_parts[i:i + n] == pat:
+                return True
+    return False
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 sock = Sock(app)
@@ -279,10 +363,10 @@ def _update_session_progress(status: dict, items: list[dict]) -> None:
     current = next((it for it in items if it.get("isCurrent")), None)
     if not current:
         return
-    uri = current.get("uri") or ""
-    if not uri:
+    pid = str(current.get("id") or "")
+    if not pid:
         return
-    _session_progress[uri] = {
+    _session_progress[pid] = {
         "watched": int(status.get("time") or 0),
         "duration": int(status.get("length") or 0),
     }
@@ -290,18 +374,30 @@ def _update_session_progress(status: dict, items: list[dict]) -> None:
 
 def _apply_progress(items: list[dict]) -> list[dict]:
     for item in items:
-        uri = item.get("uri") or ""
-        if uri and uri in _session_progress:
-            item["progress"] = dict(_session_progress[uri])
+        pid = str(item.get("id") or "")
+        if pid and pid in _session_progress:
+            item["progress"] = dict(_session_progress[pid])
     return items
 
 
 _last_seen: dict | None = None
 _last_playlist_json: str | None = None
+_last_playlist: list[dict] = []
+_current_playing_dir_cache: str | None = None
+_auto_root_last_log: str = ""
+
+
+def _note_auto_miss(reason: str, **kv) -> None:
+    global _auto_root_last_log
+    key = f"{reason}|{kv.get('uri','')}|{kv.get('dir','')}"
+    if key == _auto_root_last_log:
+        return
+    _auto_root_last_log = key
+    log_event("auto_root_miss", reason=reason, **kv)
 
 
 def broadcaster_loop() -> None:
-    global _last_seen, _last_playlist_json
+    global _last_seen, _last_playlist_json, _last_playlist, _current_playing_dir_cache
 
     while True:
         time.sleep(0.75)
@@ -363,6 +459,31 @@ def broadcaster_loop() -> None:
             if status is not None:
                 _update_session_progress(status, pl)
             pl = _apply_progress(pl)
+            _last_playlist = pl
+
+            new_dir: str | None = None
+            if FILE_BROWSE_AUTO:
+                found_current = False
+                for it in pl:
+                    if not it.get("isCurrent"):
+                        continue
+                    found_current = True
+                    uri = it.get("uri") or ""
+                    if uri.startswith("file://"):
+                        p = unquote(urlparse(uri).path)
+                        d = os.path.dirname(p)
+                        if os.path.isdir(d):
+                            new_dir = os.path.realpath(d)
+                        else:
+                            _note_auto_miss("not_a_dir", uri=uri, dir=d)
+                    else:
+                        _note_auto_miss("not_file_uri", uri=uri)
+                    break
+                if not found_current and pl:
+                    _note_auto_miss("no_current")
+            if new_dir != _current_playing_dir_cache:
+                _current_playing_dir_cache = new_dir
+
             pl_json = json.dumps(pl, sort_keys=True)
             if pl_json != _last_playlist_json:
                 _last_playlist_json = pl_json
@@ -610,6 +731,240 @@ def playlist_playnow():
     mark_api_action("playlist_playnow", cid=cid, value=uri)
     log_event("action", who="web", cid=cid, op="playlist_playnow", value=uri)
     return "ok"
+
+
+def _require_file_browse() -> None:
+    if not FILE_BROWSE:
+        abort(403)
+
+
+def _current_playing_dir() -> str | None:
+    return _current_playing_dir_cache if FILE_BROWSE_AUTO else None
+
+
+def _now_playing_dir_realpath() -> str | None:
+    for it in _last_playlist:
+        if not it.get("isCurrent"):
+            continue
+        uri = it.get("uri") or ""
+        if not uri.startswith("file://"):
+            return None
+        p = unquote(urlparse(uri).path)
+        d = os.path.dirname(p)
+        return os.path.realpath(d) if os.path.isdir(d) else None
+    return None
+
+
+def _log_file_value(full: str) -> str:
+    playing_dir = _now_playing_dir_realpath()
+    if playing_dir and os.path.realpath(os.path.dirname(full)) == playing_dir:
+        return os.path.basename(full)
+    return full
+
+
+def _resolve_root(rid: str) -> tuple[str, str, bool] | None:
+    if rid == "auto":
+        d = _current_playing_dir()
+        return ("Now playing folder", d, FILE_BROWSE_AUTO_RECURSIVE) if d else None
+    if not rid.startswith("r"):
+        return None
+    try:
+        idx = int(rid[1:])
+    except ValueError:
+        return None
+    if 0 <= idx < len(_FILE_ROOTS):
+        return _FILE_ROOTS[idx]
+    return None
+
+
+def _safe_join(root: str, rel: str, *, allow_sub: bool = True) -> str | None:
+    rel = (rel or "").strip().lstrip("/").replace("\\", "/").rstrip("/")
+    if rel and ".." in rel.split("/"):
+        return None
+    if rel and not allow_sub and "/" in rel:
+        return None
+    full = os.path.realpath(os.path.join(root, rel))
+    if full != root and not full.startswith(root + os.sep):
+        return None
+    return full
+
+
+def _ext_of(name: str) -> str:
+    _, dot, ext = name.rpartition(".")
+    return ext.lower() if dot else ""
+
+
+def _ext_allowed(name: str) -> bool:
+    if not FILE_BROWSE_EXTENSIONS:
+        return True
+    return _ext_of(name) in FILE_BROWSE_EXTENSIONS
+
+
+def _path_to_uri(p: str) -> str:
+    return "file://" + quote(p)
+
+
+def _list_dir(full: str, rel: str, *, allow_sub: bool = True) -> list[dict]:
+    entries: list[dict] = []
+    try:
+        names = os.listdir(full)
+    except OSError:
+        return entries
+
+    rel_norm = (rel or "").strip("/").replace("\\", "/").lower()
+    base_parts = [s for s in rel_norm.split("/") if s]
+
+    uri_index: dict[str, dict] = {}
+    for it in _last_playlist:
+        u = it.get("uri") or ""
+        if u:
+            uri_index[u] = it
+
+    for name in names:
+        if name.startswith("."):
+            continue
+        lo = name.lower()
+        p = os.path.join(full, name)
+        try:
+            if os.path.isdir(p):
+                if not allow_sub:
+                    continue
+                if _is_blacklisted_term(name):
+                    continue
+                if _is_blacklisted_dir_path(base_parts + [lo]):
+                    continue
+                entries.append({"name": name, "type": "dir"})
+            elif os.path.isfile(p) and _ext_allowed(name):
+                if _is_blacklisted_term(name):
+                    continue
+                entry = {
+                    "name": name,
+                    "type": "file",
+                    "ext": _ext_of(name),
+                    "size": os.path.getsize(p),
+                }
+                uri = _path_to_uri(p)
+                it = uri_index.get(uri)
+                if it:
+                    pid = str(it.get("id") or "")
+                    entry["inPlaylist"] = True
+                    if pid:
+                        entry["playlistId"] = pid
+                    if it.get("isCurrent"):
+                        entry["isCurrent"] = True
+                    if pid and pid in _session_progress:
+                        entry["progress"] = dict(_session_progress[pid])
+                    if not entry.get("progress") and it.get("duration"):
+                        entry["duration"] = int(it.get("duration") or 0)
+                entries.append(entry)
+        except OSError:
+            continue
+    entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
+    return entries
+
+
+@app.get("/api/files/roots")
+def files_roots():
+    require_token()
+    require_sid()
+    _require_file_browse()
+
+    out: list[dict] = []
+    if _current_playing_dir():
+        out.append({"id": "auto", "label": "Now playing folder"})
+    for i, (label, _rp, _rec) in enumerate(_FILE_ROOTS):
+        out.append({"id": f"r{i}", "label": label})
+    return jsonify(out)
+
+
+@app.get("/api/files")
+def files_list():
+    require_token()
+    require_sid()
+    _require_file_browse()
+
+    rid = request.args.get("root", "").strip()
+    rel = request.args.get("path", "").strip()
+
+    r = _resolve_root(rid)
+    if not r:
+        abort(404)
+    label, root, recursive = r
+
+    full = _safe_join(root, rel, allow_sub=recursive)
+    if full is None or not os.path.isdir(full):
+        abort(404)
+
+    return jsonify({
+        "root": {"id": rid, "label": label, "recursive": recursive},
+        "path": rel.strip("/"),
+        "entries": _list_dir(full, rel, allow_sub=recursive),
+    })
+
+
+def _resolve_file_arg() -> tuple[str, str, str]:
+    rid = request.args.get("root", "").strip()
+    rel = request.args.get("path", "").strip()
+
+    r = _resolve_root(rid)
+    if not r:
+        abort(404)
+    _label, root, recursive = r
+
+    full = _safe_join(root, rel, allow_sub=recursive)
+    if full is None or not os.path.isfile(full) or not _ext_allowed(os.path.basename(full)):
+        abort(404)
+
+    return rid, rel, full
+
+
+def _playlist_find_by_uri(uri: str) -> str | None:
+    for it in _last_playlist:
+        if it.get("uri") == uri:
+            pid = it.get("id")
+            return str(pid) if pid else None
+    return None
+
+
+@app.get("/api/files/add")
+def files_add():
+    require_token()
+    _, cid = require_sid()
+    _require_file_browse()
+
+    _rid, rel, full = _resolve_file_arg()
+    uri = _path_to_uri(full)
+
+    existing = _playlist_find_by_uri(uri)
+    if existing:
+        return jsonify({"status": "already_present", "id": existing})
+
+    vlc_get("/requests/status.xml", params={"command": "in_enqueue", "input": uri})
+    mark_api_action("files_add", cid=cid, value=rel)
+    log_event("action", who="web", cid=cid, op="files_add", value=_log_file_value(full))
+    return jsonify({"status": "added"})
+
+
+@app.get("/api/files/play")
+def files_play():
+    require_token()
+    _, cid = require_sid()
+    _require_file_browse()
+
+    _rid, rel, full = _resolve_file_arg()
+    uri = _path_to_uri(full)
+
+    existing = _playlist_find_by_uri(uri)
+    if existing:
+        vlc_get("/requests/status.xml", params={"command": "pl_play", "id": existing})
+        mark_api_action("files_play_existing", cid=cid, value=existing)
+        log_event("action", who="web", cid=cid, op="files_play_existing", value=os.path.basename(full))
+        return jsonify({"status": "jumped", "id": existing})
+
+    vlc_get("/requests/status.xml", params={"command": "in_play", "input": uri})
+    mark_api_action("files_play", cid=cid, value=rel)
+    log_event("action", who="web", cid=cid, op="files_play", value=_log_file_value(full))
+    return jsonify({"status": "added_and_played"})
 
 
 @app.get("/api/clients")

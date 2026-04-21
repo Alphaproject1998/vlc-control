@@ -23,13 +23,22 @@ window.uiConfig = window.uiConfig || {
         showClients: true,
         showWSStatus: true,
         showButtons: true,
-        showIcons: true, //TODO: needs applying to playlist modal.
+        showIcons: true,
         showSystemStatus: true,
         showFooter: true,
         showPlaylist: true,
         showPlaylistPrevNext: true,
         showPlaylistProgressEntries: true,
-        showPlaylistProgressTime: true
+        showPlaylistProgressTime: true,
+        showPlaylistProgressTimeResume: true, //TODO: The accent color applied to resumable toggle
+        showPlaylistSelectMulti: true, //TODO: Checkbox to multi select, when multi selected dropdown on bottom left? "With Selected"
+        showFileBrowser: true,
+        showFileBrowserSearch: true, //TODO: Search toggle
+        showFileBrowserFileSize: true, //TODO: File Size Toggle
+        showFileBrowserFileIcons: true, //TODO: File Icons Toggle
+        showFileBrowserFileIndicator: true, //TODO: File Status Indicator Toggle
+        showFileBrowserFoldersGrouped: true, //TODO: Make and toggle: when true each of the folders/directories are grouped away from the other files so when icons are not showing it is clear
+        showFileBrowserSelectMulti: true //TODO: Checkbox to multi select, when multi selected dropdown on bottom left? "With Selected"
     },
     buttons: {
         playPause: true,
@@ -39,14 +48,21 @@ window.uiConfig = window.uiConfig || {
         seekJumps: true,
         playlist: true,
         clearPlaylist: true,
-        removeTrack: true
+        removeTrack: true,
+        addFile: true, //TODO: Add file to playlist button
+        playFile: true //TODO: Play file directly button
     },
     features: {
         allowSeeking: true,
         keyboardEvents: true,
         updateTabTitle: true,
         playlistControl: true,
-        resumePrompt: true
+        fileBrowser: true, //TODO: controls if the file browser works or not (think if it as master toggle)
+        resumePrompt: true, //TODO:
+        removePrompt: true, //TODO:
+        playlistUndo: true, //TODO:
+        playlistSelectMulti: true, //TODO:
+        fileBrowserSelectMulti: true //TODO:
     },
     config: {
         seekJumpBy: 10,
@@ -54,11 +70,10 @@ window.uiConfig = window.uiConfig || {
         resumeMinPercent: 5,
         resumeMinSeconds: 10,
         resumeMaxPercent: 95,
-        resumeTailSeconds: 300
+        resumeTailSeconds: 300,
+        fileBrowserAsGrid: false //TODO: Display toggle for how the file browser displays files
     }
 };
-//TODO: showPlaylistPrevNext, showPlaylistProgressEntries, showPlaylistProgressTime, playlistControl.
-//TODO: add a chip to use with showPlaylistProgressEntries on main ui.
 
 function getUiConfigSafe(){
     return (typeof window !== "undefined" && window.uiConfig) ? window.uiConfig : {};
@@ -160,6 +175,8 @@ function applyUiConfigToDom(){
     const wsChip = document.getElementById("ws");
     if (wsChip) wsChip.style.display = (layout.showWSStatus === false) ? "none" : "";
 
+    updatePlaylistCountChip();
+
     const setBtn = (id, on) => {
         const el = document.getElementById(id);
         if (!el) return;
@@ -176,8 +193,13 @@ function applyUiConfigToDom(){
     setBtn("btnPlaylist", showPlaylist);
     const playlistModalFooter = document.getElementById("playlistModalFooter");
     const clearBtn = document.getElementById("btnPlClear");
-    if (clearBtn) clearBtn.style.display = (btns.clearPlaylist === false) ? "none" : "";
-    if (playlistModalFooter) playlistModalFooter.style.display = (btns.clearPlaylist === false) ? "none" : "";
+    const addBtn = document.getElementById("btnPlAddFiles");
+    const playlistControl = !(feat.playlistControl === false);
+    const showClear = playlistControl && !(btns.clearPlaylist === false);
+    const showAddFiles = playlistControl && !(layout.showFileBrowser === false) && !(btns.addFiles === false);
+    if (clearBtn) clearBtn.style.display = showClear ? "" : "none";
+    if (addBtn) addBtn.style.display = showAddFiles ? "" : "none";
+    if (playlistModalFooter) playlistModalFooter.style.display = (showClear || showAddFiles) ? "" : "none";
 
     const jump = getSeekJumpBy();
     const lb = document.getElementById("lblBack");
@@ -186,11 +208,14 @@ function applyUiConfigToDom(){
     if (lf) lf.textContent = `+${jump}s`;
 
     const showIcons = !(layout.showIcons === false);
-    document.querySelectorAll(".grid button").forEach(btn => {
+    document.querySelectorAll(".grid button, #btnPlAddFiles").forEach(btn => {
         const first = btn.childNodes && btn.childNodes.length ? btn.childNodes[0] : null;
         if (first && first.nodeType === Node.TEXT_NODE){
+            if (btn.dataset.iconText === undefined){
+                btn.dataset.iconText = first.textContent;
+            }
+            first.textContent = showIcons ? btn.dataset.iconText : "";
             btn.style.gap = showIcons ? "10px" : "0px";
-            if (!showIcons) first.textContent = "";
         }
     });
 
@@ -243,6 +268,8 @@ function setUiBusy(on, label){
     document.querySelectorAll(".modal button").forEach(btn => { btn.disabled = !!on; });
     const plModal = document.getElementById("playlistModal");
     if (plModal) plModal.classList.toggle("busy", !!on);
+    const fbModal = document.getElementById("fileBrowserModal");
+    if (fbModal) fbModal.classList.toggle("busy", !!on);
 
     const outEl = document.getElementById("out");
     const pillEl = document.getElementById("pill");
@@ -450,8 +477,11 @@ function lockUI(reason, cooldownSec=0){
     if (progress) progress.disabled = true;
 
     closePlaylist();
+    closeFileBrowser();
     const plm = document.getElementById("playlistModal");
     if (plm) plm.classList.add("busy");
+    const fbm = document.getElementById("fileBrowserModal");
+    if (fbm) fbm.classList.add("busy");
 
     dragging = false;
     seekTargetSec = null;
@@ -494,6 +524,8 @@ function unlockUI(){
     if (wsEl) wsEl.textContent = "ws: connected";
     const plm = document.getElementById("playlistModal");
     if (plm) plm.classList.remove("busy");
+    const fbm = document.getElementById("fileBrowserModal");
+    if (fbm) fbm.classList.remove("busy");
     updatePlayPauseButtonFromState((lastStatus && lastStatus.state) || "unknown");
 }
 
@@ -648,10 +680,34 @@ const playlistItemsEl = document.getElementById("playlistItems");
 const playlistEmptyEl = document.getElementById("playlistEmpty");
 const btnPlClose = document.getElementById("btnPlClose");
 const btnPlClear = document.getElementById("btnPlClear");
+const playlistCountChip = document.getElementById("playlistCountChip");
+
+function canOpenPlaylist(){
+    const cfg = getUiConfigSafe();
+    const layout = cfg.layout || {};
+    const btns = cfg.buttons || {};
+    return !(layout.showPlaylist === false) && !(btns.playlist === false);
+}
+
+function updatePlaylistCountChip(){
+    if (!playlistCountChip) return;
+    const cfg = getUiConfigSafe();
+    const layout = cfg.layout || {};
+    const enabled = !(layout.showPlaylistProgressEntries === false);
+    if (!enabled){
+        playlistCountChip.hidden = true;
+        return;
+    }
+    const n = playlistItems.length;
+    playlistCountChip.hidden = false;
+    playlistCountChip.textContent = String(n);
+    playlistCountChip.title = `${n} in playlist`;
+}
 
 function openPlaylist() {
     if(!playlistModal) return;
     playlistModal.hidden = false;
+    if (isKeyboardInput()) requestAnimationFrame(() => focusFirstPlaylistItem());
 }
 function closePlaylist() {
     if(!playlistModal) return;
@@ -659,7 +715,98 @@ function closePlaylist() {
 }
 function isPlaylistOpen(){ return playlistModal && !playlistModal.hidden; }
 
+function isAnyModalOpen(){
+    return isResumeOpen() || isPlaylistOpen() || isFileBrowserOpen();
+}
+
+let __lastInputMode = "mouse";
+document.addEventListener("pointerdown", () => { __lastInputMode = "mouse"; }, true);
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Tab" || e.key === "Enter" || e.key === " " || e.key === "Escape" || e.key === "q" || e.key.startsWith("Arrow")){
+        __lastInputMode = "keyboard";
+    }
+}, true);
+function isKeyboardInput(){ return __lastInputMode === "keyboard"; }
+
+function modalFocusables(modal){
+    if (!modal) return [];
+    const sel = "button, input, select, textarea, [tabindex]:not([tabindex='-1'])";
+    return Array.from(modal.querySelectorAll(sel)).filter(el => {
+        if (el.hidden || el.disabled) return false;
+        const rect = el.getBoundingClientRect();
+        if (!rect.width && !rect.height) return false;
+        return true;
+    });
+}
+
+function trapTab(modal, e){
+    if (e.key !== "Tab") return false;
+    const items = modalFocusables(modal);
+    if (!items.length) return false;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const ae = document.activeElement;
+    if (e.shiftKey){
+        if (ae === first || !items.includes(ae)){
+            e.preventDefault();
+            last.focus();
+            return true;
+        }
+    } else if (ae === last){
+        e.preventDefault();
+        first.focus();
+        return true;
+    }
+    return false;
+}
+
+function listArrowNav(listEl, e){
+    const items = Array.from(listEl.querySelectorAll("li[tabindex='0']"));
+    if (!items.length) return false;
+    const ae = document.activeElement;
+    let idx = items.indexOf(ae);
+    if (e.key === "ArrowDown"){
+        e.preventDefault();
+        idx = (idx < 0) ? 0 : Math.min(items.length - 1, idx + 1);
+        items[idx].focus();
+        return true;
+    }
+    if (e.key === "ArrowUp"){
+        e.preventDefault();
+        idx = (idx < 0) ? items.length - 1 : Math.max(0, idx - 1);
+        items[idx].focus();
+        return true;
+    }
+    if (e.key === "Home"){
+        e.preventDefault();
+        items[0].focus();
+        return true;
+    }
+    if (e.key === "End"){
+        e.preventDefault();
+        items[items.length - 1].focus();
+        return true;
+    }
+    return false;
+}
+
+function focusFirstPlaylistItem(){
+    if (!playlistItemsEl) return;
+    const first = playlistItemsEl.querySelector("li[tabindex='0']");
+    if (first) { first.focus(); return; }
+    if (btnPlClose) btnPlClose.focus();
+}
+
 function updatePrevNextHints() {
+    const cfg = getUiConfigSafe();
+    const layout = cfg.layout || {};
+    const showHints = !(layout.showPlaylistPrevNext === false);
+    if (!showHints){
+        btnPrev.title = "Previous";
+        btnNext.title = "Next";
+        return;
+    }
+
     const n = playlistItems.length;
     const idx = playlistItems.findIndex(it => it.isCurrent);
     const random = !!(window.__lastStatus && window.__lastStatus.random);
@@ -689,8 +836,14 @@ function renderPlaylist(){
     if(!playlistItemsEl || !playlistEmptyEl) return;
 
     const cfg = getUiConfigSafe();
+    const layout = cfg.layout || {};
     const btns = cfg.buttons || {};
-    const showRemove = !(btns.removeTrack === false);
+    const feat = cfg.features || {};
+    const controlEnabled = !(feat.playlistControl === false);
+    const showRemove = controlEnabled && !(btns.removeTrack === false);
+    const showProgressTime = !(layout.showPlaylistProgressTime === false);
+
+    updatePlaylistCountChip();
 
     playlistItemsEl.innerHTML = "";
     if (!playlistItems.length){
@@ -731,9 +884,11 @@ function renderPlaylist(){
 
         li.className = cls;
         li.dataset.id = item.id;
+        li.tabIndex = 0;
+        li.setAttribute("role", "option");
 
         let ind;
-        if (iconAction){
+        if (iconAction && controlEnabled){
             ind = document.createElement("button");
             ind.type = "button";
             ind.setAttribute("aria-label", iconAction === "toggle" ? "Play / pause" : "Resume track");
@@ -742,12 +897,12 @@ function renderPlaylist(){
         }
         ind.className = "pl-indicator";
         ind.textContent = indicator;
-        if (iconAction === "toggle"){
+        if (controlEnabled && iconAction === "toggle"){
             ind.addEventListener("click", (e) => {
                 e.stopPropagation();
                 hit("toggle");
             });
-        } else if (iconAction === "resume"){
+        } else if (controlEnabled && iconAction === "resume"){
             ind.addEventListener("click", (e) => {
                 e.stopPropagation();
                 requestPlaylistPlay(item);
@@ -757,12 +912,15 @@ function renderPlaylist(){
 
         const name = document.createElement("span");
         name.className = "pl-name";
-        name.textContent = item.name || item.uri || "(untitled)";
+        const nameValue = item.name || item.uri || "(untitled)";
+        name.textContent = nameValue
+        name.title = nameValue;
         li.appendChild(name);
 
-        if(item.duration > 0 || item.progress){
+        if(showProgressTime && (item.duration > 0 || item.progress)){
             const dur = document.createElement("span");
             dur.className = "pl-duration"; //TODO: maybe add similar clock toggle that main ui has to playlist clocks. Or some way to see time left.
+            if (isSignificantProgress(item)) dur.classList.add("resumable");
             const total = (item.progress && item.progress.duration > 0)
                 ? item.progress.duration
                 : item.duration;
@@ -787,8 +945,10 @@ function renderPlaylist(){
             li.appendChild(rm);
         }
 
-        if (!isActiveRow){
+        if (controlEnabled && !isActiveRow){
             li.addEventListener("click", () => requestPlaylistPlay(item));
+        } else if (!controlEnabled){
+            li.style.cursor = "default";
         }
 
         playlistItemsEl.appendChild(li);
@@ -834,6 +994,7 @@ function openResumeModal(item){
     resumeBody.appendChild(nameEl);
     resumeBody.appendChild(msg);
     resumeModal.hidden = false;
+    if (isKeyboardInput()) requestAnimationFrame(() => { if (btnResumeContinue) btnResumeContinue.focus(); });
     return new Promise((resolve) => { resumeResolver = resolve; });
 }
 
@@ -908,6 +1069,9 @@ async function playlistClear() {
 }
 
 if(btnPlaylist) btnPlaylist.addEventListener("click", openPlaylist);
+if(playlistCountChip) playlistCountChip.addEventListener("click", () => {
+    if (canOpenPlaylist()) openPlaylist();
+});
 if(btnPlClose) btnPlClose.addEventListener("click", closePlaylist);
 if(btnPlClear) btnPlClear.addEventListener("click", playlistClear);
 if(playlistModal){
@@ -917,13 +1081,420 @@ if(playlistModal){
 }
 document.addEventListener("keydown", (e) => {
     if (isResumeOpen()){
+        if (trapTab(resumeModal, e)) return;
         if (e.key === "Escape"){ e.preventDefault(); closeResumeModal("cancel"); return; }
-        if (e.key === "Enter"){ e.preventDefault(); closeResumeModal("resume"); return; }
         if (e.key === "Backspace"){ e.preventDefault(); closeResumeModal("restart"); return; }
+        if (e.key === " " || e.key === "Spacebar"){
+            e.preventDefault(); e.stopPropagation();
+            closeResumeModal("resume");
+            return;
+        }
+        const ae = document.activeElement;
+        const actionBtns = [btnResumeCancel, btnResumeRestart, btnResumeContinue].filter(Boolean);
+        const targeted = actionBtns.includes(ae);
+        if (e.key === "Enter"){
+            if (!targeted){
+                e.preventDefault();
+                closeResumeModal("resume");
+            }
+            return;
+        }
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight"){
+            if (!actionBtns.length) return;
+            e.preventDefault();
+            let idx = targeted ? actionBtns.indexOf(ae) : actionBtns.length - 1;
+            idx = (e.key === "ArrowRight") ? (idx + 1) % actionBtns.length
+                                           : (idx - 1 + actionBtns.length) % actionBtns.length;
+            actionBtns[idx].focus();
+            return;
+        }
         return;
     }
-    if (e.key === "Escape" && isPlaylistOpen()) closePlaylist();
+    if (isFileBrowserOpen()){
+        if (trapTab(fileBrowserModal, e)) return;
+        const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
+        const inSearch = (tag === "input" || tag === "textarea");
+        if (e.key === "Escape"){ e.preventDefault(); closeFileBrowser(); return; }
+        if (e.key === "Backspace" && !inSearch){ e.preventDefault(); fbBack(); return; }
+        if (inSearch && e.key === "ArrowDown"){
+            const first = fbItemsEl && fbItemsEl.querySelector("li[tabindex='0']");
+            if (first){ e.preventDefault(); first.focus(); return; }
+        }
+        if (!inSearch && fbItemsEl && listArrowNav(fbItemsEl, e)) return;
+        if (!inSearch && e.key === "Enter"){
+            const ae = document.activeElement;
+            if (ae && ae.tagName === "LI" && fbItemsEl.contains(ae)){
+                e.preventDefault();
+                ae.click();
+            }
+            return;
+        }
+        if (!inSearch && (e.key === " " || e.key === "Spacebar")){
+            const ae = document.activeElement;
+            if (ae && ae.tagName === "LI" && fbItemsEl.contains(ae)){
+                const playBtn = ae.querySelector(".fb-btn.play");
+                if (playBtn){
+                    e.preventDefault(); e.stopPropagation();
+                    playBtn.click();
+                }
+            }
+            return;
+        }
+        return;
+    }
+    if (isPlaylistOpen()){
+        if (trapTab(playlistModal, e)) return;
+        if (e.key === "Escape"){ e.preventDefault(); closePlaylist(); return; }
+        if (e.key === " " || e.key === "Spacebar"){
+            e.preventDefault(); e.stopPropagation();
+            const state = String((window.__lastStatus && window.__lastStatus.state) || "").toLowerCase();
+            const current = playlistItems.find(it => it.isCurrent);
+            if (current && state !== "playing" && state !== "paused"){
+                requestPlaylistPlay(current);
+            } else if (btnToggle && btnToggle.style.display !== "none"){
+                btnToggle.click();
+            }
+            return;
+        }
+        if (playlistItemsEl && listArrowNav(playlistItemsEl, e)) return;
+        const ae = document.activeElement;
+        const onItem = ae && ae.tagName === "LI" && playlistItemsEl && playlistItemsEl.contains(ae);
+        if (onItem && e.key === "Enter"){
+            e.preventDefault();
+            ae.click();
+            return;
+        }
+        if (onItem && (e.key === "Delete" || e.key === "Backspace")){
+            const rm = ae.querySelector(".pl-remove");
+            if (rm){ e.preventDefault(); rm.click(); }
+            return;
+        }
+    }
 });
+
+const fileBrowserModal = document.getElementById("fileBrowserModal");
+const fbItemsEl = document.getElementById("fbItems");
+const fbEmptyEl = document.getElementById("fbEmpty");
+const fbCrumbsEl = document.getElementById("fbCrumbs");
+const fbSearchEl = document.getElementById("fbSearch");
+const btnFbClose = document.getElementById("btnFbClose");
+const btnPlAddFiles = document.getElementById("btnPlAddFiles");
+const toastHost = document.getElementById("toastHost");
+
+function showToast(msg, kind, ms){
+    if (!toastHost) return;
+    const t = document.createElement("div");
+    t.className = "toast" + (kind ? ` ${kind}` : "");
+    t.textContent = String(msg || "");
+    toastHost.appendChild(t);
+    requestAnimationFrame(() => t.classList.add("show"));
+    const life = Number(ms) > 0 ? Number(ms) : 2800;
+    setTimeout(() => {
+        t.classList.remove("show");
+        const done = () => { try { t.remove(); } catch(_e){} };
+        t.addEventListener("transitionend", done, { once: true });
+        setTimeout(done, 400);
+    }, life);
+}
+
+let fbState = { rootId: null, rootLabel: "", path: "", entries: [], roots: [] };
+
+function openFileBrowser(){
+    if (!fileBrowserModal) return;
+    fileBrowserModal.hidden = false;
+    fbState = { rootId: null, rootLabel: "", path: "", entries: [], roots: [] };
+    if (fbSearchEl) fbSearchEl.value = "";
+    loadFbRoots();
+    if (isKeyboardInput()) requestAnimationFrame(() => { if (fbSearchEl) fbSearchEl.focus(); });
+}
+function closeFileBrowser(){
+    if (!fileBrowserModal) return;
+    fileBrowserModal.hidden = true;
+}
+function isFileBrowserOpen(){ return fileBrowserModal && !fileBrowserModal.hidden; }
+
+function fileStatus(e){
+    if (!e || e.type !== "file") return null;
+    if (e.isCurrent) return { kind: "playing", icon: "▶", title: "Playing now" };
+    const p = e.progress;
+    if (p){
+        const watched = Number(p.watched) || 0;
+        const duration = Number(p.duration) || Number(e.duration) || 0;
+        if (duration > 0 && watched > 0){
+            const cfg = getUiConfigSafe().config || {};
+            const minPct  = Number(cfg.resumeMinPercent ?? 5);
+            const minSec  = Number(cfg.resumeMinSeconds ?? 10);
+            const maxPct  = Number(cfg.resumeMaxPercent ?? 95);
+            const tailSec = Number(cfg.resumeTailSeconds ?? 300);
+            const floor = Math.max(duration * minPct / 100, minSec);
+            const ceil  = Math.min(duration * maxPct / 100, duration - tailSec);
+            if (watched >= ceil) return { kind: "completed", icon: "✓", title: "Played - completed" };
+            if (watched > floor) return { kind: "partial", icon: "◐", title: `Partial - ${fmtTime(Math.floor(watched))} of ${fmtTime(Math.floor(duration))}` };
+        }
+    }
+    if (e.inPlaylist) return { kind: "queued", icon: "📥", title: "In playlist" };
+    return null;
+}
+
+function fmtSize(n){
+    n = Number(n) || 0;
+    if (n < 1024) return `${n} B`;
+    const u = ["KB", "MB", "GB", "TB"];
+    let i = -1; let v = n;
+    do { v /= 1024; i++; } while (v >= 1024 && i < u.length - 1);
+    return `${v.toFixed(v < 10 ? 1 : 0)} ${u[i]}`;
+}
+
+async function loadFbRoots(){
+    if (!sid) return;
+    try{
+        const r = await apiGet("/api/files/roots");
+        const data = await r.json();
+        fbState.roots = Array.isArray(data) ? data : [];
+        if (fbState.roots.length === 1){
+            await loadFbDir(fbState.roots[0].id, "");
+        } else {
+            fbState.rootId = null;
+            fbState.rootLabel = "";
+            fbState.path = "";
+            fbState.entries = fbState.roots.map(x => ({ name: x.label, type: "root", rootId: x.id }));
+            renderFb();
+        }
+    }catch(e){
+        console.error("roots load failed", e);
+        fbState.entries = [];
+        renderFb();
+    }
+}
+
+async function loadFbDir(rootId, path){
+    if (!sid) return;
+    try{
+        const r = await apiGet(`/api/files?root=${encodeURIComponent(rootId)}&path=${encodeURIComponent(path || "")}`);
+        const data = await r.json();
+        fbState.rootId = data.root.id;
+        fbState.rootLabel = data.root.label;
+        fbState.path = data.path || "";
+        fbState.entries = Array.isArray(data.entries) ? data.entries : [];
+        renderFb();
+    }catch(e){
+        console.error("dir load failed", e);
+    }
+}
+
+function fbParentPath(p){
+    if (!p) return "";
+    const parts = p.split("/").filter(Boolean);
+    parts.pop();
+    return parts.join("/");
+}
+
+function fbChildPath(name){
+    return fbState.path ? `${fbState.path}/${name}` : name;
+}
+
+function renderFbCrumbs(){
+    if (!fbCrumbsEl) return;
+    fbCrumbsEl.innerHTML = "";
+
+    const addCrumb = (label, onClick, isCurrent) => {
+        const el = document.createElement(onClick ? "button" : "span");
+        el.className = "fb-crumb" + (isCurrent ? " current" : "");
+        el.textContent = label;
+        if (onClick){ el.type = "button"; el.addEventListener("click", onClick); }
+        fbCrumbsEl.appendChild(el);
+    };
+    const addSep = () => {
+        const s = document.createElement("span");
+        s.className = "fb-crumb-sep"; s.textContent = "›";
+        fbCrumbsEl.appendChild(s);
+    };
+
+    const multiRoot = fbState.roots.length > 1;
+
+    if (!fbState.rootId){
+        addCrumb("Root", null, true);
+        return;
+    }
+    if (multiRoot){
+        addCrumb("Root", () => loadFbRoots(), false);
+        addSep();
+    }
+
+    const parts = (fbState.path || "").split("/").filter(Boolean);
+    if (parts.length === 0){
+        addCrumb(fbState.rootLabel, null, true);
+    } else {
+        addCrumb(fbState.rootLabel, () => loadFbDir(fbState.rootId, ""), false);
+        let acc = "";
+        parts.forEach((seg, i) => {
+            addSep();
+            acc = acc ? `${acc}/${seg}` : seg;
+            const last = (i === parts.length - 1);
+            if (last){
+                addCrumb(seg, null, true);
+            } else {
+                const target = acc;
+                addCrumb(seg, () => loadFbDir(fbState.rootId, target), false);
+            }
+        });
+    }
+}
+
+function renderFb(){
+    if (!fbItemsEl || !fbEmptyEl) return;
+    renderFbCrumbs();
+    fbItemsEl.innerHTML = "";
+
+    const filter = (fbSearchEl && fbSearchEl.value || "").trim().toLowerCase();
+    const base = fbState.entries.filter(e => !filter || e.name.toLowerCase().includes(filter));
+    const multiRoot = fbState.roots.length > 1;
+    const inSubdir = !!fbState.rootId && !!fbState.path;
+    const atRootTop = !!fbState.rootId && !fbState.path;
+    const showUp = inSubdir || (atRootTop && multiRoot);
+    const entries = showUp ? [{ name: "Up one level", type: "up" }, ...base] : base;
+
+    if (!entries.length){
+        fbEmptyEl.style.display = "";
+        fbItemsEl.style.display = "none";
+        return;
+    }
+    fbEmptyEl.style.display = "none";
+    fbItemsEl.style.display = "";
+
+    for (const e of entries){
+        const li = document.createElement("li");
+        const isDirish = (e.type === "dir" || e.type === "root");
+        const isUp = (e.type === "up");
+        li.className = "playlist-item fb-item" + (isDirish ? " dir" : "") + (isUp ? " up" : "");
+        li.tabIndex = 0;
+        li.setAttribute("role", "option");
+
+        const ind = document.createElement("span");
+        ind.className = "pl-indicator";
+        ind.textContent = isUp ? "⬆" : (isDirish ? "📁" : "🎬");
+        li.appendChild(ind);
+
+        const name = document.createElement("span");
+        name.className = "pl-name";
+        const nameValue = e.name || "(untitled)";
+        name.textContent = nameValue;
+        name.title = nameValue;
+        li.appendChild(name);
+
+        if (e.type === "file"){
+            const st = fileStatus(e);
+            if (st){
+                const badge = document.createElement("span");
+                badge.className = `fb-status ${st.kind}`;
+                badge.textContent = st.icon;
+                badge.title = st.title;
+                li.appendChild(badge);
+            }
+            if (e.size != null){
+                const sz = document.createElement("span");
+                sz.className = "fb-size";
+                sz.textContent = fmtSize(e.size);
+                li.appendChild(sz);
+            }
+        }
+
+        if (isUp){
+            li.addEventListener("click", () => fbBack());
+        } else if (isDirish){
+            li.addEventListener("click", () => {
+                if (e.type === "root") loadFbDir(e.rootId, "");
+                else loadFbDir(fbState.rootId, fbChildPath(e.name));
+            });
+        } else {
+            const actions = document.createElement("span");
+            actions.className = "fb-actions";
+
+            const addBtn = document.createElement("button");
+            addBtn.className = "fb-btn add";
+            addBtn.type = "button";
+            addBtn.textContent = "➕";
+            addBtn.title = "Add to playlist";
+            addBtn.addEventListener("click", (ev) => { ev.stopPropagation(); filesAdd(e.name); });
+
+            const playBtn = document.createElement("button");
+            playBtn.className = "fb-btn play";
+            playBtn.type = "button";
+            playBtn.textContent = "▶";
+            playBtn.title = "Play now";
+            playBtn.addEventListener("click", (ev) => { ev.stopPropagation(); filesPlay(e.name); });
+
+            actions.appendChild(addBtn);
+            actions.appendChild(playBtn);
+            li.appendChild(actions);
+
+            li.addEventListener("click", () => filesAdd(e.name));
+        }
+
+        fbItemsEl.appendChild(li);
+    }
+}
+
+async function filesAdd(name){
+    if (!sid || !fbState.rootId) return;
+    const rel = fbChildPath(name);
+    setUiBusy(true, "Adding…");
+    try{
+        const r = await apiGet(`/api/files/add?root=${encodeURIComponent(fbState.rootId)}&path=${encodeURIComponent(rel)}`);
+        const data = await r.json().catch(() => ({}));
+        if (data.status === "already_present"){
+            showToast(`Already in playlist: ${name}`, "info");
+        } else {
+            showToast(`Added: ${name}`, "ok");
+        }
+    }catch(e){
+        console.error("files add failed", e);
+        showToast(`Failed to add: ${name}`, "err");
+    }finally{
+        setUiBusy(false);
+    }
+}
+
+async function filesPlay(name){
+    if (!sid || !fbState.rootId) return;
+    const rel = fbChildPath(name);
+    setUiBusy(true, "Sending…");
+    try{
+        const r = await apiGet(`/api/files/play?root=${encodeURIComponent(fbState.rootId)}&path=${encodeURIComponent(rel)}`);
+        const data = await r.json().catch(() => ({}));
+        if (data.status === "jumped"){
+            showToast(`Playing existing entry: ${name}`, "info");
+        } else {
+            showToast(`Added & playing: ${name}`, "ok");
+        }
+        closeFileBrowser();
+        closePlaylist();
+    }catch(e){
+        console.error("files play failed", e);
+        showToast(`Failed to play: ${name}`, "err");
+    }finally{
+        setUiBusy(false);
+    }
+}
+
+function fbBack(){
+    if (!fbState.rootId){ closeFileBrowser(); return; }
+    if (!fbState.path){
+        if (fbState.roots.length > 1) loadFbRoots();
+        else closeFileBrowser();
+        return;
+    }
+    loadFbDir(fbState.rootId, fbParentPath(fbState.path));
+}
+
+if (btnPlAddFiles) btnPlAddFiles.addEventListener("click", openFileBrowser);
+if (btnFbClose) btnFbClose.addEventListener("click", closeFileBrowser);
+if (fileBrowserModal){
+    fileBrowserModal.addEventListener("click", (e) => {
+        if (e.target === fileBrowserModal) closeFileBrowser();
+    });
+}
+if (fbSearchEl) fbSearchEl.addEventListener("input", () => renderFb());
 
 async function fetchClients(){
     try{
@@ -1027,6 +1598,9 @@ function connectWS(){
                 playlistItems = Array.isArray(msg.data) ? msg.data : [];
                 window.__playlist = playlistItems;
                 renderPlaylist();
+                if (isFileBrowserOpen() && fbState.rootId){
+                    loadFbDir(fbState.rootId, fbState.path);
+                }
             }
         }catch{}
     };
@@ -1046,6 +1620,7 @@ function setupKeyboardShortcuts(){
 
     window.__vlcKbHandler = (e) => {
         if (e.repeat) return;
+        if (isAnyModalOpen()) return;
         const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
         if (tag === "input" || tag === "textarea" || tag === "select" || (e.target && e.target.isContentEditable)) return;
         if (e.altKey || e.ctrlKey || e.metaKey) return;

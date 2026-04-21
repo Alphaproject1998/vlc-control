@@ -32,7 +32,16 @@
     "showPlaylist": true,
     "showPlaylistPrevNext": true,
     "showPlaylistProgressEntries": true,
-    "showPlaylistProgressTime": true
+    "showPlaylistProgressTime": true,
+    "showPlaylistProgressTimeResume": true,
+    "showPlaylistSelectMulti": true,
+    "showFileBrowser": true,
+    "showFileBrowserSearch": true,
+    "showFileBrowserFileSize": true,
+    "showFileBrowserFileIcons": true,
+    "showFileBrowserFileIndicators": true,
+    "showFileBrowserFoldersGrouped": true,
+    "showFileBrowserSelectMulti": true
   },
   "buttons": {
     "playPause": true,
@@ -42,14 +51,19 @@
     "seekJumps": true,
     "playlist": true,
     "clearPlaylist": true,
-    "removeTrack": true
+    "removeTrack": true,
+    "addFile": true,
+    "playFile": true
   },
   "features": {
     "allowSeeking": true,
     "keyboardEvents": true,
     "updateTabTitle": true,
     "playlistControl": true,
-    "resumePrompt": true
+    "fileBrowser": true,
+    "resumePrompt": true,
+    "removePrompt": true,
+    "playlistUndo": true
   },
   "config": {
     "seekJumpBy": 10,
@@ -57,6 +71,8 @@
     "resumeMinSeconds": 10,
     "resumeMaxPercent": 95,
     "resumeTailSeconds": 300,
-    "clockShowRemaining": false
+    "clockShowRemaining": false,
+    "fileBrowserAsGrid": false
   }
 }
+
