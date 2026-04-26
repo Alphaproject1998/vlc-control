@@ -250,11 +250,17 @@ Optional: `cloudflared` for tunnel support, `wl-copy`/`xclip` for clipboard auto
 
 ---
 
-## License
+## License & Use
 
-AGPL v3. See [LICENSE](LICENSE) for the full text.
+This project is licensed under AGPLv3.  See [LICENSE](LICENSE) for the full text.
 
-You can self-host it, modify it, redistribute it — but if you run a modified version as a network service, you have to share your changes under the same license. Full details in the license file.
+**Personal & private use (most users):** You can modify this code and run it
+for yourself and friends without any obligations. You are not required to open-source modifications for private use. Though they are certainly accepted.
+If you plan to run this software with friends, this is for you.
+
+**Commercial/Public use:** If you run a public service or commercial
+offering based on modifications, you must provide source code to users
+(per AGPLv3). You cannot run a proprietary SaaS version.
 
 ---
 
