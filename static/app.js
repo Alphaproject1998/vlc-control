@@ -6,7 +6,6 @@
  * - realtime VLC status via WebSocket
  * - control commands via HTTP endpoints
  */
-//TODO: Need to optimize dom manipulation only update what needs to and make javascript similar so that less is passively happening when it doesn't need to.
 window.uiConfig = window.uiConfig || {
     title: "VLC Control",
     subtitle: "Realtime now-playing + scrub seek",
@@ -30,13 +29,13 @@ window.uiConfig = window.uiConfig || {
         showPlaylistPrevNext: true,
         showPlaylistProgressEntries: true,
         showPlaylistProgressTime: true,
-        showPlaylistProgressTimeResume: true, //TODO: The accent color applied to resumable toggle
+        showPlaylistProgressTimeResume: true,
         showPlaylistSelectMulti: true, //TODO: Checkbox to multi select, when multi selected dropdown on bottom left? "With Selected"
         showFileBrowser: true,
-        showFileBrowserSearch: true, //TODO: Search toggle
-        showFileBrowserFileSize: true, //TODO: File Size Toggle
+        showFileBrowserSearch: true,
+        showFileBrowserFileSize: true,
         showFileBrowserFileIcons: true, //TODO: File Icons Toggle
-        showFileBrowserFileIndicator: true, //TODO: File Status Indicator Toggle
+        showFileBrowserFileIndicator: true,
         showFileBrowserFoldersGrouped: true, //TODO: Make and toggle: when true each of the folders/directories are grouped away from the other files so when icons are not showing it is clear
         showFileBrowserSelectMulti: true //TODO: Checkbox to multi select, when multi selected dropdown on bottom left? "With Selected"
     },
@@ -49,20 +48,20 @@ window.uiConfig = window.uiConfig || {
         playlist: true,
         clearPlaylist: true,
         removeTrack: true,
-        addFile: true, //TODO: Add file to playlist button
-        playFile: true //TODO: Play file directly button
+        addFile: true,
+        playFile: true
     },
     features: {
         allowSeeking: true,
         keyboardEvents: true,
         updateTabTitle: true,
         playlistControl: true,
-        fileBrowser: true, //TODO: controls if the file browser works or not (think if it as master toggle)
-        resumePrompt: true, //TODO:
-        removePrompt: true, //TODO:
-        playlistUndo: true, //TODO:
-        playlistSelectMulti: true, //TODO:
-        fileBrowserSelectMulti: true //TODO:
+        fileBrowser: true,
+        resumePrompt: true,
+        removePrompt: true, //TODO: Make a whole "are you sure you want to remove" prompt, this is the toggle.
+        playlistUndo: true, //TODO: Undo system, this is the toggle
+        playlistSelectMulti: true, //TODO: multiselect toggle
+        fileBrowserSelectMulti: true //TODO: multiselect toggle
     },
     config: {
         seekJumpBy: 10,
@@ -71,23 +70,23 @@ window.uiConfig = window.uiConfig || {
         resumeMinSeconds: 10,
         resumeMaxPercent: 95,
         resumeTailSeconds: 300,
-        fileBrowserAsGrid: false //TODO: Display toggle for how the file browser displays files
+        fileBrowserAsGrid: false
     }
 };
 
-function getUiConfigSafe(){
-    return (typeof window !== "undefined" && window.uiConfig) ? window.uiConfig : {};
-}
+//function getUiConfigSafe(){
+//    return (typeof window !== "undefined" && window.uiConfig) ? window.uiConfig : {};
+//}
 
 function getSeekJumpBy(){
-    const cfg = getUiConfigSafe();
-    const v = (cfg.config && Number(cfg.config.seekJumpBy)) ? Number(cfg.config.seekJumpBy) : 10;
-    return Math.max(1, Math.min(600, Math.floor(v)));
+    const config = window.uiConfig.config;
+    const val = (config && Number(config.seekJumpBy)) ? Number(config.seekJumpBy) : 10;
+    return Math.max(1, Math.min(600, Math.floor(val)));
 }
 
 function applyThemeVars(theme){
     if (!theme) return;
-    const r = document.documentElement;
+    const cssRoot = document.documentElement;
     const map = {
         background: "--bg",
         panel: "--panel",
@@ -103,7 +102,7 @@ function applyThemeVars(theme){
     };
     for (const k of Object.keys(map)){
         if (theme[k] != null && theme[k] !== ""){
-            r.style.setProperty(map[k], String(theme[k]));
+            cssRoot.style.setProperty(map[k], String(theme[k]));
         }
     }
 }
@@ -126,34 +125,33 @@ function _normalizeButtonRowPairs(pairs){
 }
 
 function applyUiConfigToDom(){
-    const cfg = getUiConfigSafe();
-    const layout = cfg.layout || {};
-    const btns = cfg.buttons || {};
-    const feat = cfg.features || {};
+    const layout = window.uiConfig.layout || {};
+    const buttonsConfig = window.uiConfig.buttons || {};
+    const features = window.uiConfig.features || {};
 
     const pageTitle = document.getElementById("pageTitle");
     const pageSubtitle = document.getElementById("pageSubtitle");
     const footer = document.getElementById("footerText");
-    if (pageTitle && cfg.title) pageTitle.textContent = cfg.title;
-    if (pageSubtitle && cfg.subtitle) pageSubtitle.textContent = cfg.subtitle;
-    if (footer && cfg.footerText) footer.textContent = cfg.footerText;
+    if (pageTitle && window.uiConfig.title) pageTitle.textContent = window.uiConfig.title;
+    if (pageSubtitle && window.uiConfig.subtitle) pageSubtitle.textContent = window.uiConfig.subtitle;
+    if (footer && window.uiConfig.footerText) footer.textContent = window.uiConfig.footerText;
 
-    if (cfg.title) document.title = String(cfg.title);
+    if (window.uiConfig.title) document.title = String(window.uiConfig.title);
 
     const header = document.querySelector("main header");
     if (header) header.style.display = (layout.showTitleBar === false) ? "none" : "";
 
-    const now = document.querySelector(".now");
-    if (now) now.style.display = (layout.showNowPlaying === false) ? "none" : "";
+    const nowPlayingEl = document.getElementById("nowPlaying");
+    if (nowPlayingEl) nowPlayingEl.style.display = (layout.showNowPlaying === false) ? "none" : "";
 
-    const pwrapEl = document.getElementById("pwrap");
-    if (pwrapEl) pwrapEl.style.display = (layout.showSeekBar === false) ? "none" : "";
+    const seekBarWrapEl = document.getElementById("seekBarWrap");
+    if (seekBarWrapEl) seekBarWrapEl.style.display = (layout.showSeekBar === false) ? "none" : "";
 
-    const previewEl = document.getElementById("preview");
-    if (previewEl) previewEl.style.display = (layout.showSeekPreview === false) ? "none" : "";
+    const seekPreviewEl = document.getElementById("seekPreview");
+    if (seekPreviewEl) seekPreviewEl.style.display = (layout.showSeekPreview === false) ? "none" : "";
 
-    const meta = document.querySelector(".meta");
-    if (meta) meta.style.display = (layout.showSystemStatus === false) ? "none" : "";
+    const nowPlayingMetaEl = document.getElementById("nowPlayingMeta");
+    if (nowPlayingMetaEl) nowPlayingMetaEl.style.display = (layout.showSystemStatus === false) ? "none" : "";
 
     const controls = document.querySelector(".grid");
     if (controls) controls.style.display = (layout.showButtons === false) ? "none" : "";
@@ -182,24 +180,29 @@ function applyUiConfigToDom(){
         if (!el) return;
         el.style.display = on ? "" : "none";
     };
-    setBtn("btnToggle", !(btns.playPause === false));
-    setBtn("btnStop",   !(btns.stop === false));
-    setBtn("btnPrev",   !(btns.previous === false));
-    setBtn("btnNext",   !(btns.next === false));
-    const seekJumps = !(btns.seekJumps === false);
+    setBtn("btnToggle", !(buttonsConfig.playPause === false));
+    setBtn("btnStop",   !(buttonsConfig.stop === false));
+    setBtn("btnPrev",   !(buttonsConfig.previous === false));
+    setBtn("btnNext",   !(buttonsConfig.next === false));
+    const seekJumps = !(buttonsConfig.seekJumps === false);
     setBtn("btnBack", seekJumps);
     setBtn("btnFwd",  seekJumps);
-    const showPlaylist = !(layout.showPlaylist === false) && !(btns.playlist === false);
+    const showPlaylist = !(layout.showPlaylist === false) && !(buttonsConfig.playlist === false);
     setBtn("btnPlaylist", showPlaylist);
     const playlistModalFooter = document.getElementById("playlistModalFooter");
-    const clearBtn = document.getElementById("btnPlClear");
-    const addBtn = document.getElementById("btnPlAddFiles");
-    const playlistControl = !(feat.playlistControl === false);
-    const showClear = playlistControl && !(btns.clearPlaylist === false);
-    const showAddFiles = playlistControl && !(layout.showFileBrowser === false) && !(btns.addFiles === false);
+    const clearBtn = document.getElementById("btnPlaylistClear");
+    const addBtn = document.getElementById("btnPlaylistAddFiles");
+    const playlistControl = !(features.playlistControl === false);
+    const showClear = playlistControl && !(buttonsConfig.clearPlaylist === false);
+    const showAddFiles = playlistControl
+        && !(features.fileBrowser === false)
+        && !(layout.showFileBrowser === false);
     if (clearBtn) clearBtn.style.display = showClear ? "" : "none";
     if (addBtn) addBtn.style.display = showAddFiles ? "" : "none";
     if (playlistModalFooter) playlistModalFooter.style.display = (showClear || showAddFiles) ? "" : "none";
+
+    const fileBrowserSearchInput = document.getElementById("fileBrowserSearch");
+    if (fileBrowserSearchInput) fileBrowserSearchInput.style.display = (layout.showFileBrowserSearch === false) ? "none" : "";
 
     const jump = getSeekJumpBy();
     const lb = document.getElementById("lblBack");
@@ -208,7 +211,7 @@ function applyUiConfigToDom(){
     if (lf) lf.textContent = `+${jump}s`;
 
     const showIcons = !(layout.showIcons === false);
-    document.querySelectorAll(".grid button, #btnPlAddFiles").forEach(btn => {
+    document.querySelectorAll(".grid button, #btnPlaylistAddFiles").forEach(btn => {
         const first = btn.childNodes && btn.childNodes.length ? btn.childNodes[0] : null;
         if (first && first.nodeType === Node.TEXT_NODE){
             if (btn.dataset.iconText === undefined){
@@ -219,12 +222,12 @@ function applyUiConfigToDom(){
         }
     });
 
-    const progressEl = document.getElementById("progress");
-    const allowSeeking = !(feat.allowSeeking === false);
-    if (progressEl){
-        progressEl.dataset.readonly = allowSeeking ? "0" : "1";
-        progressEl.style.pointerEvents = allowSeeking ? "" : "none";
-        if (layout.showSeekBar === false) progressEl.style.pointerEvents = "none";
+    const seekBarEl = document.getElementById("seekBar");
+    const allowSeeking = !(features.allowSeeking === false);
+    if (seekBarEl){
+        seekBarEl.dataset.readonly = allowSeeking ? "0" : "1";
+        seekBarEl.style.pointerEvents = allowSeeking ? "" : "none";
+        //if (layout.showSeekBar === false) seekBarEl.style.pointerEvents = "none";
     }
 
     _normalizeButtonRowPairs([
@@ -238,14 +241,14 @@ async function loadFrontendConfig(){
     const loaderText = document.getElementById("loaderText");
     try{
         if (loaderText) loaderText.textContent = "Loading config…";
-        const r = await fetch("/frontend.json", { cache: "no-store" });
-        if (!r.ok) return false;
-        const cfg = await r.json();
-        window.uiConfig = Object.assign({}, window.uiConfig, cfg || {});
+        const response = await fetch("/frontend.json", { cache: "no-store" });
+        if (!response.ok) return false;
+        const fetchedConfig = await response.json();
+        Object.assign(window.uiConfig, fetchedConfig || {});
         return true;
-    }catch(e){
+    }catch(err){
         if (loaderText) loaderText.textContent = "Config error (frontend.json)";
-        console.warn("frontend.json load failed:", e);
+        console.warn("frontend.json load failed:", err);
         return false;
     }
 }
@@ -258,7 +261,7 @@ function showAppAndHideLoader(){
 }
 
 function setUiBusy(on, label){
-    const ids = ["btnToggle","btnStop","btnPrev","btnNext","btnBack","btnFwd","progress"];
+    const ids = ["btnToggle","btnStop","btnPrev","btnNext","btnBack","btnFwd","seekBar"];
     for (const id of ids){
         const el = document.getElementById(id);
         if (!el) continue;
@@ -266,35 +269,35 @@ function setUiBusy(on, label){
     }
 
     document.querySelectorAll(".modal button").forEach(btn => { btn.disabled = !!on; });
-    const plModal = document.getElementById("playlistModal");
-    if (plModal) plModal.classList.toggle("busy", !!on);
-    const fbModal = document.getElementById("fileBrowserModal");
-    if (fbModal) fbModal.classList.toggle("busy", !!on);
+    const playlistModalEl = document.getElementById("playlistModal");
+    if (playlistModalEl) playlistModalEl.classList.toggle("busy", !!on);
+    const fileBrowserModalEl = document.getElementById("fileBrowserModal");
+    if (fileBrowserModalEl) fileBrowserModalEl.classList.toggle("busy", !!on);
 
-    const outEl = document.getElementById("out");
-    const pillEl = document.getElementById("pill");
+    const statusTextEl = document.getElementById("statusText");
+    const statusPillEl = document.getElementById("statusPill");
 
     if (on){
-        if (outEl && outEl.dataset.prevText === undefined) outEl.dataset.prevText = outEl.textContent || "";
-        if (pillEl && pillEl.dataset.prevText === undefined){
-            pillEl.dataset.prevText = pillEl.textContent || "";
-            pillEl.dataset.prevClass = pillEl.className || "";
+        if (statusTextEl && statusTextEl.dataset.prevText === undefined) statusTextEl.dataset.prevText = statusTextEl.textContent || "";
+        if (statusPillEl && statusPillEl.dataset.prevText === undefined){
+            statusPillEl.dataset.prevText = statusPillEl.textContent || "";
+            statusPillEl.dataset.prevClass = statusPillEl.className || "";
         }
-        if (outEl) outEl.textContent = label || "Sending…";
-        if (pillEl){
-            pillEl.textContent = "WORKING";
-            pillEl.className = "pill warn";
+        if (statusTextEl) statusTextEl.textContent = label || "Sending…";
+        if (statusPillEl){
+            statusPillEl.textContent = "WORKING";
+            statusPillEl.className = "status-pill warn";
         }
     } else {
-        if (outEl && outEl.dataset.prevText !== undefined){
-            outEl.textContent = outEl.dataset.prevText;
-            delete outEl.dataset.prevText;
+        if (statusTextEl && statusTextEl.dataset.prevText !== undefined){
+            statusTextEl.textContent = statusTextEl.dataset.prevText;
+            delete statusTextEl.dataset.prevText;
         }
-        if (pillEl && pillEl.dataset.prevText !== undefined){
-            pillEl.textContent = pillEl.dataset.prevText;
-            pillEl.className = pillEl.dataset.prevClass || "pill ok";
-            delete pillEl.dataset.prevText;
-            delete pillEl.dataset.prevClass;
+        if (statusPillEl && statusPillEl.dataset.prevText !== undefined){
+            statusPillEl.textContent = statusPillEl.dataset.prevText;
+            statusPillEl.className = statusPillEl.dataset.prevClass || "status-pill ok";
+            delete statusPillEl.dataset.prevText;
+            delete statusPillEl.dataset.prevClass;
         }
     }
 }
@@ -310,18 +313,18 @@ function getSidSafe(){ return window.__sid || ""; }
 
 async function apiGet(path){
     const t = getTokenSafe();
-    const s = getSidSafe();
+    const sid = getSidSafe();
     const join = path.includes("?") ? "&" : "?";
-    const url = `${path}${join}t=${encodeURIComponent(t)}&sid=${encodeURIComponent(s)}`;
-    const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r;
+    const url = `${path}${join}t=${encodeURIComponent(t)}&sid=${encodeURIComponent(sid)}`;
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response;
 }
 
 async function refreshStatusOnce(){
     try{
-        const r = await apiGet("/api/status");
-        const data = await r.json();
+        const response = await apiGet("/api/status");
+        const data = await response.json();
         window.__lastStatus = data;
         applyStatus(data || {});
     }catch(_e){}
@@ -343,17 +346,17 @@ if (!cid){
 }
 
 function applyClockDefaultFromConfig(){
-    const cfg = getUiConfigSafe();
-    const def = !!(cfg.config && cfg.config.clockShowRemaining);
+    const config = window.uiConfig.config;
+    const defaultShowRemaining = !!(config && config.clockShowRemaining);
     try{
         if (localStorage.getItem(CLOCK_KEY) == null){
-            localStorage.setItem(CLOCK_KEY, def ? "elapsed_remaining" : "elapsed_total");
+            localStorage.setItem(CLOCK_KEY, defaultShowRemaining ? "elapsed_remaining" : "elapsed_total");
         }
     }catch(_e){}
 }
 
-const out = document.getElementById("out");
-const pill = document.getElementById("pill");
+const statusTextEl = document.getElementById("statusText");
+const statusPillEl = document.getElementById("statusPill");
 
 const titleEl = document.getElementById("title");
 const stateEl = document.getElementById("state");
@@ -361,9 +364,9 @@ const clockEl = document.getElementById("clock");
 const wsEl = document.getElementById("ws");
 const clientsEl = document.getElementById("clients");
 
-const progress = document.getElementById("progress");
-const pwrap = document.getElementById("pwrap");
-const preview = document.getElementById("preview");
+const seekBarEl = document.getElementById("seekBar");
+const seekBarWrapEl = document.getElementById("seekBarWrap");
+const seekPreviewEl = document.getElementById("seekPreview");
 
 const buttons = [
     document.getElementById("btnToggle"),
@@ -385,13 +388,13 @@ let seekTargetSec = null;
 
 let showRemaining = (localStorage.getItem(CLOCK_KEY) || "elapsed_total") === "elapsed_remaining";
 
-function setBusy(busy){ buttons.forEach(b => { if (b) b.disabled = busy; }); }
-function setPill(kind, text){
-    pill.classList.remove("ok", "err", "warn");
-    if (kind) pill.classList.add(kind);
-    pill.textContent = text;
+function setControlsBusy(busy){ buttons.forEach(b => { if (b) b.disabled = busy; }); }
+function setStatusPill(kind, text){
+    statusPillEl.classList.remove("ok", "err", "warn");
+    if (kind) statusPillEl.classList.add(kind);
+    statusPillEl.textContent = text;
 }
-function fmtTime(s){
+function formatTime(s){
     s = Math.max(0, Number(s || 0));
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
@@ -400,12 +403,26 @@ function fmtTime(s){
     const ss = String(sec).padStart(2, "0");
     return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
-function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+function clampZeroToOne(x){ return Math.max(0, Math.min(1, x)); }
 
-function tabTitleFromStatus(s){
-    const mediaTitle = (s.title && String(s.title).trim()) ? String(s.title).trim() : "Nothing playing";
-    const emoji = (s.state === "playing") ? "▶️" : (s.state === "paused") ? "⏸️" : "🎬";
-    return (s.state === "error") ? "VLC ⚠️ not reachable" : `VLC: ${emoji} ${mediaTitle}`;
+function setText(el, val){
+    if (!el) return;
+    if (el.textContent !== val) el.textContent = val;
+}
+function setAttrIfChanged(el, name, val){
+    if (!el) return;
+    if (el.getAttribute(name) !== val) el.setAttribute(name, val);
+}
+function setClass(el, cls, on){
+    if (!el) return;
+    const has = el.classList.contains(cls);
+    if (!!on !== has) el.classList.toggle(cls, !!on);
+}
+
+function tabTitleFromStatus(status){
+    const mediaTitle = (status.title && String(status.title).trim()) ? String(status.title).trim() : "Nothing playing";
+    const emoji = (status.state === "playing") ? "▶️" : (status.state === "paused") ? "⏸️" : "🎬";
+    return (status.state === "error") ? "VLC ⚠️ not reachable" : `VLC: ${emoji} ${mediaTitle}`;
 }
 
 function updatePlayPauseButtonFromState(state){
@@ -417,50 +434,50 @@ function updatePlayPauseButtonFromState(state){
     const setPrefix = (emoji) => {
         const first = btn.childNodes && btn.childNodes.length ? btn.childNodes[0] : null;
         if (first && first.nodeType === Node.TEXT_NODE){
-            first.textContent = emoji ? (emoji + " ") : "";
+            const iconText = emoji ? (emoji + " ") : "";
+            if (btn.dataset.iconText !== iconText) btn.dataset.iconText = iconText;
+            const showIcons = !(window.uiConfig?.layout?.showIcons === false);
+            const desired = showIcons ? iconText : "";
+            if (first.textContent !== desired) first.textContent = desired;
         }
     };
 
     if (s === "playing"){
         setPrefix("⏸️");
-        if (span) span.textContent = "Pause";
+        setText(span, "Pause");
     } else if (s === "paused" || s === "stopped"){
         setPrefix("▶️");
-        if (span) span.textContent = "Play";
+        setText(span, "Play");
     } else {
         setPrefix("⏯️");
-        if (span) span.textContent = "Play / Pause";
+        setText(span, "Play / Pause");
     }
 }
 
 function renderClockFromStatus(){
-    const t = Number(lastStatus.time || 0);
-    const L = Number(lastStatus.length || 0);
-
     if (!clockEl) return;
+    const t = Number(lastStatus.time || 0);
+    const totalLengthSec = Number(lastStatus.length || 0);
+    let text;
 
-    if (seekTargetSec != null && L > 0){
-        const target = Math.max(0, Math.min(L, Number(seekTargetSec)));
+    if (seekTargetSec != null && totalLengthSec > 0){
+        const target = Math.max(0, Math.min(totalLengthSec, Number(seekTargetSec)));
         if (showRemaining){
-            const remAtTarget = Math.max(0, L - target);
-            clockEl.textContent = `Seek to ${fmtTime(target)} / -${fmtTime(remAtTarget)}`;
+            const remAtTarget = Math.max(0, totalLengthSec - target);
+            text = `Seek to ${formatTime(target)} / -${formatTime(remAtTarget)}`;
         } else {
-            clockEl.textContent = `Seek to ${fmtTime(target)} / ${fmtTime(L)}`;
+            text = `Seek to ${formatTime(target)} / ${formatTime(totalLengthSec)}`;
         }
-        return;
-    }
-
-    if (!L){
-        clockEl.textContent = `${fmtTime(t)} / ${fmtTime(L)}`;
-        return;
-    }
-
-    if (showRemaining){
-        const rem = Math.max(0, L - t);
-        clockEl.textContent = `${fmtTime(t)} / -${fmtTime(rem)}`;
+    } else if (!totalLengthSec){
+        text = `${formatTime(t)} / ${formatTime(totalLengthSec)}`;
+    } else if (showRemaining){
+        const rem = Math.max(0, totalLengthSec - t);
+        text = `${formatTime(t)} / -${formatTime(rem)}`;
     } else {
-        clockEl.textContent = `${fmtTime(t)} / ${fmtTime(L)}`;
+        text = `${formatTime(t)} / ${formatTime(totalLengthSec)}`;
     }
+
+    setText(clockEl, text);
 }
 
 if (clockEl){
@@ -473,83 +490,89 @@ if (clockEl){
 
 function lockUI(reason, cooldownSec=0){
     sid = "";
-    setBusy(true);
-    if (progress) progress.disabled = true;
+    setControlsBusy(true);
+    if (seekBarEl) seekBarEl.disabled = true;
 
     closePlaylist();
     closeFileBrowser();
-    const plm = document.getElementById("playlistModal");
-    if (plm) plm.classList.add("busy");
-    const fbm = document.getElementById("fileBrowserModal");
-    if (fbm) fbm.classList.add("busy");
+    const playlistModalEl = document.getElementById("playlistModal");
+    if (playlistModalEl) playlistModalEl.classList.add("busy");
+    const fileBrowserModalEl = document.getElementById("fileBrowserModal");
+    if (fileBrowserModalEl) fileBrowserModalEl.classList.add("busy");
 
     dragging = false;
     seekTargetSec = null;
-    if (preview) preview.classList.remove("show");
+    if (seekPreviewEl) seekPreviewEl.classList.remove("show");
 
     if (!wsEl || !titleEl || !stateEl) return;
 
     if (reason === "full"){
         wsEl.textContent = "ws: waiting";
         titleEl.textContent = "Server full";
+        setAttrIfChanged(titleEl, "title", "Server full");
         stateEl.textContent = "state: full";
         if (clockEl) clockEl.textContent = "";
-        document.title = "VLC Control — FULL";
-        if (out) out.textContent = "Server full — waiting for a slot…";
-        setPill("err", "FULL");
+        document.title = "VLC Control - FULL";
+        if (statusTextEl) statusTextEl.textContent = "Server full - waiting for a slot…";
+        setStatusPill("err", "FULL");
     } else if (reason === "cooldown"){
         wsEl.textContent = "ws: waiting";
         titleEl.textContent = "Waiting for grace…";
+        setAttrIfChanged(titleEl, "title", "Waiting for grace…");
         stateEl.textContent = `state: grace (${cooldownSec}s)`;
         if (clockEl) clockEl.textContent = "";
-        document.title = "VLC Control — WAITING";
-        if (out) out.textContent = `Seat reserved — grace remaining (${cooldownSec}s)…`;
-        setPill("", "WAIT");
+        document.title = "VLC Control - WAITING";
+        if (statusTextEl) statusTextEl.textContent = `Seat reserved - grace remaining (${cooldownSec}s)…`;
+        setStatusPill("", "WAIT");
     } else {
         wsEl.textContent = "ws: waiting";
         titleEl.textContent = "Waiting for a slot…";
+        setAttrIfChanged(titleEl, "title", "Waiting for a slot…");
         stateEl.textContent = "state: waiting";
         if (clockEl) clockEl.textContent = "";
         document.title = "VLC Control — WAITING";
-        if (out) out.textContent = "Waiting…";
-        setPill("", "WAIT");
+        if (statusTextEl) statusTextEl.textContent = "Waiting…";
+        setStatusPill("", "WAIT");
     }
 }
 
 function unlockUI(){
-    setBusy(false);
-    if (progress) progress.disabled = false;
-    if (out) out.textContent = "Admitted";
-    setPill("ok", "OK");
+    setControlsBusy(false);
+    if (seekBarEl) seekBarEl.disabled = false;
+    if (statusTextEl) statusTextEl.textContent = "Admitted";
+    setStatusPill("ok", "OK");
     if (wsEl) wsEl.textContent = "ws: connected";
-    const plm = document.getElementById("playlistModal");
-    if (plm) plm.classList.remove("busy");
-    const fbm = document.getElementById("fileBrowserModal");
-    if (fbm) fbm.classList.remove("busy");
+    const playlistModalEl = document.getElementById("playlistModal");
+    if (playlistModalEl) playlistModalEl.classList.remove("busy");
+    const fileBrowserModalEl = document.getElementById("fileBrowserModal");
+    if (fileBrowserModalEl) fileBrowserModalEl.classList.remove("busy");
     updatePlayPauseButtonFromState((lastStatus && lastStatus.state) || "unknown");
 }
 
-function applyStatus(s){
+function applyStatus(status){
     const prevState = (lastStatus && lastStatus.state) || "";
-    lastStatus = s || lastStatus;
+    lastStatus = status || lastStatus;
     const newState = (lastStatus && lastStatus.state) || "";
 
     const mediaTitle = (lastStatus.title && String(lastStatus.title).trim()) ? String(lastStatus.title).trim() : "Nothing playing";
-    if (titleEl) titleEl.textContent = mediaTitle;
-    if (stateEl) stateEl.textContent = `state: ${lastStatus.state || "unknown"}`;
+    setText(titleEl, mediaTitle);
+    setAttrIfChanged(titleEl, "title", mediaTitle);
+    setText(stateEl, `state: ${lastStatus.state || "unknown"}`);
 
-    updatePlayPauseButtonFromState(lastStatus.state);
+    if (newState !== prevState) updatePlayPauseButtonFromState(newState);
 
-    const cfgT = getUiConfigSafe();
-    if (sid && !(cfgT.features && cfgT.features.updateTabTitle === false)){
-        document.title = tabTitleFromStatus(lastStatus);
+    const features = window.uiConfig.features;
+    if (sid && !(features && features.updateTabTitle === false)){
+        const newTitle = tabTitleFromStatus(lastStatus);
+        if (document.title !== newTitle) document.title = newTitle;
     }
 
     renderClockFromStatus();
 
-    if (!dragging && progress){
+    if (!dragging && seekBarEl){
         const p = Math.max(0, Math.min(1, Number(lastStatus.progress || 0)));
-        progress.value = String(Math.round(p * 1000));
+        const v = String(Math.round(p * 1000));
+        if (seekBarEl.value !== v) seekBarEl.value = v;
     }
 
     updatePrevNextHints();
@@ -557,29 +580,27 @@ function applyStatus(s){
 }
 
 function setPreviewFromSlider(){
-    const cfgUi = getUiConfigSafe();
-    const layout = cfgUi.layout || {};
+    const layout = window.uiConfig.layout || {};
     if (layout.showSeekPreview === false) return;
 
-    const p = clamp01(Number(progress.value) / 1000);
+    const p = clampZeroToOne(Number(seekBarEl.value) / 1000);
     const L = Number(lastStatus.length || 0);
     const targetSec = Math.round(L * p);
     seekTargetSec = targetSec;
 
-    if (preview){
-        preview.textContent = `Seek to ${fmtTime(targetSec)}`;
-        const rect = progress.getBoundingClientRect();
+    if (seekPreviewEl){
+        seekPreviewEl.textContent = `Seek to ${formatTime(targetSec)}`;
+        const rect = seekBarEl.getBoundingClientRect();
         const x = rect.left + rect.width * p;
-        const wrapRect = pwrap.getBoundingClientRect();
-        preview.style.left = `${x - wrapRect.left}px`;
+        const wrapRect = seekBarWrapEl.getBoundingClientRect();
+        seekPreviewEl.style.left = `${x - wrapRect.left}px`;
     }
     renderClockFromStatus();
 }
 
 async function seekVal(val){
     if (!sid) return;
-    const cfg = getUiConfigSafe();
-    if (cfg.features && cfg.features.allowSeeking === false) return;
+    if (window.uiConfig.features && window.uiConfig.features.allowSeeking === false) return;
 
     setUiBusy(true, "Sending…");
     try{
@@ -592,14 +613,16 @@ async function seekVal(val){
 }
 
 async function seekBy(deltaSeconds){
-    const cfg = getUiConfigSafe();
-    if (cfg.features && cfg.features.allowSeeking === false) return;
+    //const cfg = getUiConfigSafe();
+    //const cfg = window.uiConfig;
+    //if (cfg.features && cfg.features.allowSeeking === false) return;
+    if (window.uiConfig.features && window.uiConfig.features.allowSeeking === false) return;
 
-    const st = window.__lastStatus || {};
-    const t = Number(st.time || 0);
-    const len = Number(st.length || 0);
+    const status = window.__lastStatus || {};
+    const currentTime = Number(status.time || 0);
+    const totalLength = Number(status.length || 0);
     const jump = Number(deltaSeconds || 0);
-    const target = (len > 0) ? Math.max(0, Math.min(len, t + jump)) : Math.max(0, t + jump);
+    const target = (totalLength > 0) ? Math.max(0, Math.min(totalLength, currentTime + jump)) : Math.max(0, currentTime + jump);
 
     setUiBusy(true, "Sending…");
     try{
@@ -613,38 +636,38 @@ async function seekBy(deltaSeconds){
 
 async function finishSeek(commit){
     if (commit && sid){
-        const p = clamp01(Number(progress.value) / 1000);
+        const p = clampZeroToOne(Number(seekBarEl.value) / 1000);
         const pct = Math.round(p * 100);
         await seekVal(`${pct}%`);
     }
-    if (preview) preview.classList.remove("show");
+    if (seekPreviewEl) seekPreviewEl.classList.remove("show");
     dragging = false;
     seekTargetSec = null;
     renderClockFromStatus();
 }
 
-if (progress){
-    progress.addEventListener("pointerdown", (e) => {
+if (seekBarEl){
+    seekBarEl.addEventListener("pointerdown", (e) => {
         if (!sid) return;
-        const cfgA = getUiConfigSafe();
-        if (cfgA.features && cfgA.features.allowSeeking === false) return;
+        const features = window.uiConfig.features;
+        if (features && features.allowSeeking === false) return;
 
         dragging = true;
-        const lay = (cfgA.layout || {});
-        if (!(lay.showSeekPreview === false) && preview) preview.classList.add("show");
-        progress.setPointerCapture?.(e.pointerId);
+        const layout = window.uiConfig.layout || {};
+        if (!(layout.showSeekPreview === false) && seekPreviewEl) seekPreviewEl.classList.add("show");
+        seekBarEl.setPointerCapture?.(e.pointerId);
         seekTargetSec = seekTargetSec ?? 0;
         setPreviewFromSlider();
     });
 
-    progress.addEventListener("input", () => { if (dragging) setPreviewFromSlider(); });
-    progress.addEventListener("pointermove", () => { if (dragging) setPreviewFromSlider(); });
-    progress.addEventListener("pointerup", () => finishSeek(true));
-    progress.addEventListener("pointercancel", () => finishSeek(false));
-    progress.addEventListener("lostpointercapture", () => { if (dragging) finishSeek(false); });
+    seekBarEl.addEventListener("input", () => { if (dragging) setPreviewFromSlider(); });
+    seekBarEl.addEventListener("pointermove", () => { if (dragging) setPreviewFromSlider(); });
+    seekBarEl.addEventListener("pointerup", () => finishSeek(true));
+    seekBarEl.addEventListener("pointercancel", () => finishSeek(false));
+    seekBarEl.addEventListener("lostpointercapture", () => { if (dragging) finishSeek(false); });
 }
 
-async function hit(which){
+async function sendApiCommand(which){
     if (!sid) return;
     setUiBusy(true, "Sending…");
     try{
@@ -664,10 +687,10 @@ const btnBack = document.getElementById("btnBack");
 const btnFwd  = document.getElementById("btnFwd");
 const btnPlaylist = document.getElementById("btnPlaylist");
 
-if (btnToggle) btnToggle.addEventListener("click", () => hit("toggle"));
-if (btnPrev)   btnPrev.addEventListener("click", () => hit("prev"));
-if (btnNext)   btnNext.addEventListener("click", () => hit("next"));
-if (btnStop)   btnStop.addEventListener("click", () => hit("stop"));
+if (btnToggle) btnToggle.addEventListener("click", () => sendApiCommand("toggle"));
+if (btnPrev)   btnPrev.addEventListener("click", () => sendApiCommand("prev"));
+if (btnNext)   btnNext.addEventListener("click", () => sendApiCommand("next"));
+if (btnStop)   btnStop.addEventListener("click", () => sendApiCommand("stop"));
 
 if (btnBack) btnBack.addEventListener("click", () => seekBy(-getSeekJumpBy()));
 if (btnFwd)  btnFwd.addEventListener("click", () => seekBy(getSeekJumpBy()));
@@ -678,30 +701,28 @@ let playlistItems = [];
 const playlistModal = document.getElementById("playlistModal");
 const playlistItemsEl = document.getElementById("playlistItems");
 const playlistEmptyEl = document.getElementById("playlistEmpty");
-const btnPlClose = document.getElementById("btnPlClose");
-const btnPlClear = document.getElementById("btnPlClear");
+const btnPlaylistClose = document.getElementById("btnPlaylistClose");
+const btnPlaylistClear = document.getElementById("btnPlaylistClear");
 const playlistCountChip = document.getElementById("playlistCountChip");
 
 function canOpenPlaylist(){
-    const cfg = getUiConfigSafe();
-    const layout = cfg.layout || {};
-    const btns = cfg.buttons || {};
-    return !(layout.showPlaylist === false) && !(btns.playlist === false);
+    return !(window.uiConfig.features?.playlistControl === false);
 }
 
 function updatePlaylistCountChip(){
     if (!playlistCountChip) return;
-    const cfg = getUiConfigSafe();
-    const layout = cfg.layout || {};
+    const layout = window.uiConfig.layout || {};
     const enabled = !(layout.showPlaylistProgressEntries === false);
     if (!enabled){
-        playlistCountChip.hidden = true;
+        if (!playlistCountChip.hidden) playlistCountChip.hidden = true;
         return;
     }
-    const n = playlistItems.length;
-    playlistCountChip.hidden = false;
-    playlistCountChip.textContent = String(n);
-    playlistCountChip.title = `${n} in playlist`;
+    if (playlistCountChip.hidden) playlistCountChip.hidden = false;
+    const count = playlistItems.length;
+    const countStr = String(count);
+    if (playlistCountChip.textContent !== countStr) playlistCountChip.textContent = countStr;
+    const title = `${count} in playlist`;
+    if (playlistCountChip.title !== title) playlistCountChip.title = title;
 }
 
 function openPlaylist() {
@@ -721,6 +742,7 @@ function isAnyModalOpen(){
 
 let __lastInputMode = "mouse";
 document.addEventListener("pointerdown", () => { __lastInputMode = "mouse"; }, true);
+document.addEventListener("touchstart", () => { __lastInputMode = "touch"; }, true);
 document.addEventListener("keydown", (e) => {
     if (e.key === "Tab" || e.key === "Enter" || e.key === " " || e.key === "Escape" || e.key === "q" || e.key.startsWith("Arrow")){
         __lastInputMode = "keyboard";
@@ -765,6 +787,61 @@ function listArrowNav(listEl, e){
     if (!items.length) return false;
     const ae = document.activeElement;
     let idx = items.indexOf(ae);
+
+    if (e.key === "Home"){
+        e.preventDefault();
+        items[0].focus();
+        return true;
+    }
+    if (e.key === "End"){
+        e.preventDefault();
+        items[items.length - 1].focus();
+        return true;
+    }
+
+    const isGrid = listEl.classList.contains("grid");
+
+    if (isGrid){
+        if (e.key === "ArrowLeft"){
+            e.preventDefault();
+            idx = (idx < 0) ? items.length - 1 : Math.max(0, idx - 1);
+            items[idx].focus();
+            return true;
+        }
+        if (e.key === "ArrowRight"){
+            e.preventDefault();
+            idx = (idx < 0) ? 0 : Math.min(items.length - 1, idx + 1);
+            items[idx].focus();
+            return true;
+        }
+        if (e.key === "ArrowDown" || e.key === "ArrowUp"){
+            e.preventDefault();
+            if (idx < 0){
+                items[e.key === "ArrowUp" ? items.length - 1 : 0].focus();
+                return true;
+            }
+            const dir = e.key === "ArrowDown" ? 1 : -1;
+            const cur = items[idx].getBoundingClientRect();
+            const cx = cur.left + cur.width / 2;
+            const cy = cur.top + cur.height / 2;
+            let best = null;
+            let bestScore = Infinity;
+            for (let i = 0; i < items.length; i++){
+                if (i === idx) continue;
+                const r = items[i].getBoundingClientRect();
+                const ry = r.top + r.height / 2;
+                const vdiff = (ry - cy) * dir;
+                if (vdiff <= 2) continue;
+                const rx = r.left + r.width / 2;
+                const score = vdiff * 1000 + Math.abs(rx - cx);
+                if (score < bestScore){ bestScore = score; best = items[i]; }
+            }
+            if (best) best.focus();
+            return true;
+        }
+        return false;
+    }
+
     if (e.key === "ArrowDown"){
         e.preventDefault();
         idx = (idx < 0) ? 0 : Math.min(items.length - 1, idx + 1);
@@ -777,16 +854,6 @@ function listArrowNav(listEl, e){
         items[idx].focus();
         return true;
     }
-    if (e.key === "Home"){
-        e.preventDefault();
-        items[0].focus();
-        return true;
-    }
-    if (e.key === "End"){
-        e.preventDefault();
-        items[items.length - 1].focus();
-        return true;
-    }
     return false;
 }
 
@@ -794,164 +861,230 @@ function focusFirstPlaylistItem(){
     if (!playlistItemsEl) return;
     const first = playlistItemsEl.querySelector("li[tabindex='0']");
     if (first) { first.focus(); return; }
-    if (btnPlClose) btnPlClose.focus();
+    if (btnPlaylistClose) btnPlaylistClose.focus();
 }
 
 function updatePrevNextHints() {
-    const cfg = getUiConfigSafe();
-    const layout = cfg.layout || {};
+    const layout = window.uiConfig.layout || {};
     const showHints = !(layout.showPlaylistPrevNext === false);
-    if (!showHints){
-        btnPrev.title = "Previous";
-        btnNext.title = "Next";
-        return;
+
+    let prevTitle = "Previous";
+    let nextTitle = "Next";
+
+    if (showHints){
+        const count = playlistItems.length;
+        const currentIndex = playlistItems.findIndex(it => it.isCurrent);
+        const random = !!(window.__lastStatus && window.__lastStatus.random);
+
+        if (random && count > 0 && currentIndex >= 0){
+            prevTitle = "Previous: (random)";
+            nextTitle = "Next: (random)";
+        } else if (count > 0 && currentIndex >= 0){
+            const prevItem = (currentIndex === 0) ? playlistItems[count - 1] : playlistItems[currentIndex - 1];
+            const nextItem = (currentIndex === count - 1) ? playlistItems[0] : playlistItems[currentIndex + 1];
+            const prevWraps = (currentIndex === 0);
+            const nextWraps = (currentIndex === count - 1);
+            prevTitle = `Previous: ${prevItem.name}${prevWraps ? " (wrap to end)" : ""}`;
+            nextTitle = `Next: ${nextItem.name}${nextWraps ? " (wrap to start)" : ""}`;
+        }
     }
 
-    const n = playlistItems.length;
-    const idx = playlistItems.findIndex(it => it.isCurrent);
-    const random = !!(window.__lastStatus && window.__lastStatus.random);
+    if (btnPrev && btnPrev.title !== prevTitle) btnPrev.title = prevTitle;
+    if (btnNext && btnNext.title !== nextTitle) btnNext.title = nextTitle;
+}
 
-    if (n === 0 || idx < 0){
-        btnPrev.title = "Previous";
-        btnNext.title = "Next";
-        return;
+function playlistRowShape(item, playbackState, controlEnabled, showRemove, showProgressTime){
+    let iconAction = "none";
+    let status = "normal";
+    if (item.isCurrent){
+        if (playbackState === "playing" || playbackState === "paused"){
+            status = "current";
+            iconAction = controlEnabled ? "toggle" : "none";
+        } else {
+            status = "last";
+            iconAction = controlEnabled ? "resume" : "none";
+        }
+    }
+    const hasDur = !!(showProgressTime && (item.duration > 0 || item.progress));
+    return `${status}|${iconAction}|${showRemove?1:0}|${hasDur?1:0}|${controlEnabled?1:0}`;
+}
+
+function playlistRowDurationText(item){
+    const total = (item.progress && item.progress.duration > 0)
+        ? item.progress.duration
+        : item.duration;
+    if (item.progress && typeof item.progress.watched === "number" && total > 0){
+        return `${formatTime(item.progress.watched)} / ${formatTime(total)}`;
+    }
+    if (total > 0) return formatTime(total);
+    return "";
+}
+
+function playlistRowIndicator(item, playbackState){
+    if (!item.isCurrent) return "";
+    if (playbackState === "playing") return "▶️";
+    if (playbackState === "paused") return "⏸️";
+    return "⏹️";
+}
+
+function buildPlaylistRow(item, shape, playbackState, controlEnabled, showRemove, showProgressTime, showResumeAccent){
+    const li = document.createElement("li");
+    li.dataset.id = item.id;
+    li.dataset.shape = shape;
+    li.tabIndex = 0;
+    li.setAttribute("role", "option");
+
+    const parts = shape.split("|");
+    const status = parts[0];
+    const iconAction = parts[1];
+    const isActiveRow = (status === "current");
+
+    let cls = "playlist-item";
+    if (status === "current") cls += " current";
+    else if (status === "last") cls += " last-played";
+    li.className = cls;
+
+    let indicatorEl;
+    if (iconAction !== "none"){
+        indicatorEl = document.createElement("button");
+        indicatorEl.type = "button";
+        indicatorEl.setAttribute("aria-label", iconAction === "toggle" ? "Play / pause" : "Resume track");
+        if (iconAction === "toggle"){
+            indicatorEl.addEventListener("click", (e) => { e.stopPropagation(); sendApiCommand("toggle"); });
+        } else {
+            indicatorEl.addEventListener("click", (e) => {
+                e.stopPropagation();
+                const cur = playlistItems.find(it => String(it.id) === li.dataset.id);
+                if (cur) requestPlaylistPlay(cur);
+            });
+        }
+    } else {
+        indicatorEl = document.createElement("span");
+    }
+    indicatorEl.className = "playlist-indicator";
+    indicatorEl.textContent = playlistRowIndicator(item, playbackState);
+    li.appendChild(indicatorEl);
+
+    const name = document.createElement("span");
+    name.className = "playlist-name";
+    const nameValue = item.name || item.uri || "(untitled)";
+    name.textContent = nameValue;
+    name.title = nameValue;
+    li.appendChild(name);
+
+    if (showProgressTime && (item.duration > 0 || item.progress)){
+        const durationEl = document.createElement("span");
+        durationEl.className = "playlist-duration";
+        if (showResumeAccent && isSignificantProgress(item)) durationEl.classList.add("resumable");
+        durationEl.textContent = playlistRowDurationText(item);
+        li.appendChild(durationEl);
     }
 
-    if (random){
-        btnPrev.title = "Previous: (random)";
-        btnNext.title = "Next: (random)";
-        return;
+    if (showRemove){
+        const removeBtn = document.createElement("button");
+        removeBtn.className = "playlist-remove";
+        removeBtn.type = "button";
+        removeBtn.setAttribute("aria-label", "Remove from playlist");
+        removeBtn.textContent = "✕";
+        removeBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            playlistRemove(li.dataset.id);
+        });
+        li.appendChild(removeBtn);
     }
 
-    const prevItem = (idx === 0) ? playlistItems[n - 1] : playlistItems[idx - 1];
-    const nextItem = (idx === n - 1) ? playlistItems[0] : playlistItems[idx + 1];
-    const prevWraps = (idx === 0);
-    const nextWraps = (idx === n - 1);
+    if (controlEnabled && !isActiveRow){
+        li.addEventListener("click", () => {
+            const cur = playlistItems.find(it => String(it.id) === li.dataset.id);
+            if (cur) requestPlaylistPlay(cur);
+        });
+    } else if (!controlEnabled){
+        li.style.cursor = "default";
+    }
 
-    btnPrev.title = `Previous: ${prevItem.name}${prevWraps ? " (wrap to end)" : ""}`;
-    btnNext.title = `Next: ${nextItem.name}${nextWraps ? " (wrap to start)" : ""}`;
+    return li;
+}
+
+function updatePlaylistRow(li, item, playbackState, showProgressTime, showResumeAccent){
+    const indicator = playlistRowIndicator(item, playbackState);
+    const indicatorEl = li.querySelector(".playlist-indicator");
+    if (indicatorEl && indicatorEl.textContent !== indicator) indicatorEl.textContent = indicator;
+
+    const name = li.querySelector(".playlist-name");
+    const nameValue = item.name || item.uri || "(untitled)";
+    if (name){
+        if (name.textContent !== nameValue) name.textContent = nameValue;
+        if (name.title !== nameValue) name.title = nameValue;
+    }
+
+    if (showProgressTime){
+        const durationEl = li.querySelector(".playlist-duration");
+        if (durationEl){
+            const text = playlistRowDurationText(item);
+            if (durationEl.textContent !== text) durationEl.textContent = text;
+            setClass(durationEl, "resumable", showResumeAccent && isSignificantProgress(item));
+        }
+    }
 }
 
 function renderPlaylist(){
     if(!playlistItemsEl || !playlistEmptyEl) return;
 
-    const cfg = getUiConfigSafe();
-    const layout = cfg.layout || {};
-    const btns = cfg.buttons || {};
-    const feat = cfg.features || {};
-    const controlEnabled = !(feat.playlistControl === false);
-    const showRemove = controlEnabled && !(btns.removeTrack === false);
+    const layout = window.uiConfig.layout || {};
+    const buttonsConfig = window.uiConfig.buttons || {};
+    const features = window.uiConfig.features || {};
+    const controlEnabled = !(features.playlistControl === false);
+    const showRemove = controlEnabled && !(buttonsConfig.removeTrack === false);
     const showProgressTime = !(layout.showPlaylistProgressTime === false);
+    const showResumeAccent = showProgressTime && !(layout.showPlaylistProgressTimeResume === false);
+    const playbackState = String((window.__lastStatus && window.__lastStatus.state) || "").toLowerCase();
 
     updatePlaylistCountChip();
 
-    playlistItemsEl.innerHTML = "";
     if (!playlistItems.length){
-        playlistEmptyEl.style.display = "";
-        playlistItemsEl.style.display = "none";
+        if (playlistItemsEl.firstChild) playlistItemsEl.innerHTML = "";
+        if (playlistEmptyEl.style.display !== "") playlistEmptyEl.style.display = "";
+        if (playlistItemsEl.style.display !== "none") playlistItemsEl.style.display = "none";
         updatePrevNextHints();
         return;
     }
-    playlistEmptyEl.style.display = "none";
-    playlistItemsEl.style.display = "";
+    if (playlistEmptyEl.style.display !== "none") playlistEmptyEl.style.display = "none";
+    if (playlistItemsEl.style.display !== "") playlistItemsEl.style.display = "";
 
-    const playbackState = String((window.__lastStatus && window.__lastStatus.state) || "").toLowerCase();
+    const existing = new Map();
+    for (const li of Array.from(playlistItemsEl.children)){
+        if (li.dataset && li.dataset.id) existing.set(li.dataset.id, li);
+    }
+
+    const seen = new Set();
+    let cursor = playlistItemsEl.firstChild;
 
     for (const item of playlistItems){
-        const li = document.createElement("li");
-        let cls = "playlist-item";
-        let indicator = "";
-        let isActiveRow = false;
-        let iconAction = null;
+        const id = String(item.id);
+        seen.add(id);
+        const shape = playlistRowShape(item, playbackState, controlEnabled, showRemove, showProgressTime);
 
-        if (item.isCurrent){
-            if (playbackState === "playing"){
-                cls += " current";
-                indicator = "▶️";
-                isActiveRow = true;
-                iconAction = "toggle";
-            } else if (playbackState === "paused"){
-                cls += " current";
-                indicator = "⏸️";
-                isActiveRow = true;
-                iconAction = "toggle";
+        let li = existing.get(id);
+        if (!li || li.dataset.shape !== shape){
+            const fresh = buildPlaylistRow(item, shape, playbackState, controlEnabled, showRemove, showProgressTime, showResumeAccent);
+            if (li){
+                playlistItemsEl.replaceChild(fresh, li);
+            } else if (cursor){
+                playlistItemsEl.insertBefore(fresh, cursor);
             } else {
-                cls += " last-played";
-                indicator = "⏹️";
-                iconAction = "resume";
+                playlistItemsEl.appendChild(fresh);
             }
-        }
-
-        li.className = cls;
-        li.dataset.id = item.id;
-        li.tabIndex = 0;
-        li.setAttribute("role", "option");
-
-        let ind;
-        if (iconAction && controlEnabled){
-            ind = document.createElement("button");
-            ind.type = "button";
-            ind.setAttribute("aria-label", iconAction === "toggle" ? "Play / pause" : "Resume track");
+            existing.set(id, fresh);
+            li = fresh;
         } else {
-            ind = document.createElement("span");
+            updatePlaylistRow(li, item, playbackState, showProgressTime, showResumeAccent);
+            if (cursor !== li) playlistItemsEl.insertBefore(li, cursor);
         }
-        ind.className = "pl-indicator";
-        ind.textContent = indicator;
-        if (controlEnabled && iconAction === "toggle"){
-            ind.addEventListener("click", (e) => {
-                e.stopPropagation();
-                hit("toggle");
-            });
-        } else if (controlEnabled && iconAction === "resume"){
-            ind.addEventListener("click", (e) => {
-                e.stopPropagation();
-                requestPlaylistPlay(item);
-            });
-        }
-        li.appendChild(ind);
+        cursor = li.nextSibling;
+    }
 
-        const name = document.createElement("span");
-        name.className = "pl-name";
-        const nameValue = item.name || item.uri || "(untitled)";
-        name.textContent = nameValue
-        name.title = nameValue;
-        li.appendChild(name);
-
-        if(showProgressTime && (item.duration > 0 || item.progress)){
-            const dur = document.createElement("span");
-            dur.className = "pl-duration"; //TODO: maybe add similar clock toggle that main ui has to playlist clocks. Or some way to see time left.
-            if (isSignificantProgress(item)) dur.classList.add("resumable");
-            const total = (item.progress && item.progress.duration > 0)
-                ? item.progress.duration
-                : item.duration;
-            if (item.progress && typeof item.progress.watched === "number" && total > 0){
-                dur.textContent = `${fmtTime(item.progress.watched)} / ${fmtTime(total)}`;
-            } else if(total > 0){
-                dur.textContent = fmtTime(total);
-            }
-            li.appendChild(dur);
-        }
-
-        if (showRemove){
-            const rm = document.createElement("button");
-            rm.className = "pl-remove";
-            rm.type = "button";
-            rm.setAttribute("aria-label", "Remove from playlist");
-            rm.textContent = "✕";
-            rm.addEventListener("click", (e) => {
-                e.stopPropagation();
-                playlistRemove(item.id);
-            });
-            li.appendChild(rm);
-        }
-
-        if (controlEnabled && !isActiveRow){
-            li.addEventListener("click", () => requestPlaylistPlay(item));
-        } else if (!controlEnabled){
-            li.style.cursor = "default";
-        }
-
-        playlistItemsEl.appendChild(li);
+    for (const [id, li] of existing){
+        if (!seen.has(id)) li.remove();
     }
 
     updatePrevNextHints();
@@ -959,14 +1092,14 @@ function renderPlaylist(){
 
 function isSignificantProgress(item){
     if(!item || !item.progress) return false;
-    const cfg = getUiConfigSafe().config || {};
+    const config = window.uiConfig.config || {};
     const watched = Number(item.progress.watched) || 0;
     const duration = Number(item.progress.duration) || Number(item.duration) || 0;
     if(duration <= 0 || watched <= 0) return false;
-    const minPct  = Number(cfg.resumeMinPercent ?? 5);
-    const minSec  = Number(cfg.resumeMinSeconds ?? 10);
-    const maxPct  = Number(cfg.resumeMaxPercent ?? 95);
-    const tailSec = Number(cfg.resumeTailSeconds ?? 300);
+    const minPct  = Number(config.resumeMinPercent ?? 5);
+    const minSec  = Number(config.resumeMinSeconds ?? 10);
+    const maxPct  = Number(config.resumeMaxPercent ?? 95);
+    const tailSec = Number(config.resumeTailSeconds ?? 300);
     const floor = Math.max(duration * minPct / 100, minSec);
     const ceil  = Math.min(duration * maxPct / 100, duration - tailSec);
     return watched > floor && watched < ceil;
@@ -989,8 +1122,8 @@ function openResumeModal(item){
     nameEl.textContent = item.name || item.uri || "(untitled)";
     const msg = document.createElement("div");
     msg.textContent = total > 0
-        ? `Last position: ${fmtTime(watched)} of ${fmtTime(total)}.`
-        : `Last position: ${fmtTime(watched)}.`;
+        ? `Last position: ${formatTime(watched)} of ${formatTime(total)}.`
+        : `Last position: ${formatTime(watched)}.`;
     resumeBody.appendChild(nameEl);
     resumeBody.appendChild(msg);
     resumeModal.hidden = false;
@@ -1000,9 +1133,9 @@ function openResumeModal(item){
 
 function closeResumeModal(choice){
     resumeModal.hidden = true;
-    const r = resumeResolver;
+    const resolver = resumeResolver;
     resumeResolver = null;
-    if(r) r(choice);
+    if(resolver) resolver(choice);
 }
 
 function isResumeOpen(){ return resumeModal && !resumeModal.hidden; }
@@ -1017,7 +1150,8 @@ resumeModal.addEventListener("click", (e) => {
 
 async function requestPlaylistPlay(item){
     if(!sid || !item) return;
-    const features = getUiConfigSafe().features || {};
+    //const features = getUiConfigSafe().features || {};
+    const features = window.uiConfig.features || {};
     if(features.resumePrompt !== false && isSignificantProgress(item)){
         const choice = await openResumeModal(item);
         if(choice === "cancel") return;
@@ -1072,8 +1206,8 @@ if(btnPlaylist) btnPlaylist.addEventListener("click", openPlaylist);
 if(playlistCountChip) playlistCountChip.addEventListener("click", () => {
     if (canOpenPlaylist()) openPlaylist();
 });
-if(btnPlClose) btnPlClose.addEventListener("click", closePlaylist);
-if(btnPlClear) btnPlClear.addEventListener("click", playlistClear);
+if(btnPlaylistClose) btnPlaylistClose.addEventListener("click", closePlaylist);
+if(btnPlaylistClear) btnPlaylistClear.addEventListener("click", playlistClear);
 if(playlistModal){
     playlistModal.addEventListener("click", (e) => {
         if(e.target === playlistModal) closePlaylist();
@@ -1115,15 +1249,15 @@ document.addEventListener("keydown", (e) => {
         const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
         const inSearch = (tag === "input" || tag === "textarea");
         if (e.key === "Escape"){ e.preventDefault(); closeFileBrowser(); return; }
-        if (e.key === "Backspace" && !inSearch){ e.preventDefault(); fbBack(); return; }
+        if (e.key === "Backspace" && !inSearch){ e.preventDefault(); fileBrowserGoBack(); return; }
         if (inSearch && e.key === "ArrowDown"){
-            const first = fbItemsEl && fbItemsEl.querySelector("li[tabindex='0']");
+            const first = fileBrowserItemsEl && fileBrowserItemsEl.querySelector("li[tabindex='0']");
             if (first){ e.preventDefault(); first.focus(); return; }
         }
-        if (!inSearch && fbItemsEl && listArrowNav(fbItemsEl, e)) return;
+        if (!inSearch && fileBrowserItemsEl && listArrowNav(fileBrowserItemsEl, e)) return;
         if (!inSearch && e.key === "Enter"){
             const ae = document.activeElement;
-            if (ae && ae.tagName === "LI" && fbItemsEl.contains(ae)){
+            if (ae && ae.tagName === "LI" && fileBrowserItemsEl.contains(ae)){
                 e.preventDefault();
                 ae.click();
             }
@@ -1131,8 +1265,8 @@ document.addEventListener("keydown", (e) => {
         }
         if (!inSearch && (e.key === " " || e.key === "Spacebar")){
             const ae = document.activeElement;
-            if (ae && ae.tagName === "LI" && fbItemsEl.contains(ae)){
-                const playBtn = ae.querySelector(".fb-btn.play");
+            if (ae && ae.tagName === "LI" && fileBrowserItemsEl.contains(ae)){
+                const playBtn = ae.querySelector(".file-browser-btn.play");
                 if (playBtn){
                     e.preventDefault(); e.stopPropagation();
                     playBtn.click();
@@ -1151,8 +1285,8 @@ document.addEventListener("keydown", (e) => {
             const current = playlistItems.find(it => it.isCurrent);
             if (current && state !== "playing" && state !== "paused"){
                 requestPlaylistPlay(current);
-            } else if (btnToggle && btnToggle.style.display !== "none"){
-                btnToggle.click();
+            } else {
+                sendApiCommand("toggle");
             }
             return;
         }
@@ -1165,20 +1299,49 @@ document.addEventListener("keydown", (e) => {
             return;
         }
         if (onItem && (e.key === "Delete" || e.key === "Backspace")){
-            const rm = ae.querySelector(".pl-remove");
-            if (rm){ e.preventDefault(); rm.click(); }
+            const removeBtn = ae.querySelector(".playlist-remove");
+            if (removeBtn){ e.preventDefault(); removeBtn.click(); }
             return;
         }
     }
 });
 
 const fileBrowserModal = document.getElementById("fileBrowserModal");
-const fbItemsEl = document.getElementById("fbItems");
-const fbEmptyEl = document.getElementById("fbEmpty");
-const fbCrumbsEl = document.getElementById("fbCrumbs");
-const fbSearchEl = document.getElementById("fbSearch");
-const btnFbClose = document.getElementById("btnFbClose");
-const btnPlAddFiles = document.getElementById("btnPlAddFiles");
+const fileBrowserItemsEl = document.getElementById("fileBrowserItems");
+const fileBrowserEmptyEl = document.getElementById("fileBrowserEmpty");
+const fileBrowserCrumbsEl = document.getElementById("fileBrowserCrumbs");
+const fileBrowserSearchEl = document.getElementById("fileBrowserSearch");
+const btnFileBrowserClose = document.getElementById("btnFileBrowserClose");
+const btnFileBrowserView = document.getElementById("btnFileBrowserView");
+const btnPlaylistAddFiles = document.getElementById("btnPlaylistAddFiles");
+
+const FILE_BROWSER_VIEW_KEY = "vlc_fb_view"; // "grid" | "list"
+function getFileBrowserViewMode(){
+    try {
+        const v = localStorage.getItem(FILE_BROWSER_VIEW_KEY);
+        if (v === "grid" || v === "list") return v;
+    } catch(_e){}
+    const config = window.uiConfig.config || {};
+    return config.fileBrowserAsGrid ? "grid" : "list";
+}
+function setFileBrowserViewMode(mode){
+    const normalized = (mode === "grid") ? "grid" : "list";
+    try { localStorage.setItem(FILE_BROWSER_VIEW_KEY, normalized); } catch(_e){}
+    applyFileBrowserViewMode();
+}
+function applyFileBrowserViewMode(){
+    if (!fileBrowserItemsEl) return;
+    const mode = getFileBrowserViewMode();
+    const isGrid = mode === "grid";
+    setClass(fileBrowserItemsEl, "grid", isGrid);
+    if (btnFileBrowserView){
+        const icon = isGrid ? "≣" : "▦";
+        const label = isGrid ? "Switch to list view" : "Switch to grid view";
+        if (btnFileBrowserView.textContent !== icon) btnFileBrowserView.textContent = icon;
+        if (btnFileBrowserView.title !== label) btnFileBrowserView.title = label;
+        btnFileBrowserView.setAttribute("aria-label", label);
+    }
+}
 const toastHost = document.getElementById("toastHost");
 
 function showToast(msg, kind, ms){
@@ -1197,15 +1360,17 @@ function showToast(msg, kind, ms){
     }, life);
 }
 
-let fbState = { rootId: null, rootLabel: "", path: "", entries: [], roots: [] };
+let fileBrowserState = { rootId: null, rootLabel: "", path: "", entries: [], roots: [] };
 
 function openFileBrowser(){
     if (!fileBrowserModal) return;
+    if (window.uiConfig.features?.fileBrowser === false) return;
     fileBrowserModal.hidden = false;
-    fbState = { rootId: null, rootLabel: "", path: "", entries: [], roots: [] };
-    if (fbSearchEl) fbSearchEl.value = "";
-    loadFbRoots();
-    if (isKeyboardInput()) requestAnimationFrame(() => { if (fbSearchEl) fbSearchEl.focus(); });
+    fileBrowserState = { rootId: null, rootLabel: "", path: "", entries: [], roots: [] };
+    if (fileBrowserSearchEl) fileBrowserSearchEl.value = "";
+    applyFileBrowserViewMode();
+    loadFileBrowserRoots();
+    if (isKeyboardInput()) requestAnimationFrame(() => { if (fileBrowserSearchEl) fileBrowserSearchEl.focus(); });
 }
 function closeFileBrowser(){
     if (!fileBrowserModal) return;
@@ -1213,30 +1378,30 @@ function closeFileBrowser(){
 }
 function isFileBrowserOpen(){ return fileBrowserModal && !fileBrowserModal.hidden; }
 
-function fileStatus(e){
-    if (!e || e.type !== "file") return null;
-    if (e.isCurrent) return { kind: "playing", icon: "▶", title: "Playing now" };
-    const p = e.progress;
+function fileStatus(entry){
+    if (!entry || entry.type !== "file") return null;
+    if (entry.isCurrent) return { kind: "playing", icon: "▶", title: "Playing now" };
+    const p = entry.progress;
     if (p){
         const watched = Number(p.watched) || 0;
-        const duration = Number(p.duration) || Number(e.duration) || 0;
+        const duration = Number(p.duration) || Number(entry.duration) || 0;
         if (duration > 0 && watched > 0){
-            const cfg = getUiConfigSafe().config || {};
-            const minPct  = Number(cfg.resumeMinPercent ?? 5);
-            const minSec  = Number(cfg.resumeMinSeconds ?? 10);
-            const maxPct  = Number(cfg.resumeMaxPercent ?? 95);
-            const tailSec = Number(cfg.resumeTailSeconds ?? 300);
+            const config = window.uiConfig.config || {};
+            const minPct  = Number(config.resumeMinPercent ?? 5);
+            const minSec  = Number(config.resumeMinSeconds ?? 10);
+            const maxPct  = Number(config.resumeMaxPercent ?? 95);
+            const tailSec = Number(config.resumeTailSeconds ?? 300);
             const floor = Math.max(duration * minPct / 100, minSec);
             const ceil  = Math.min(duration * maxPct / 100, duration - tailSec);
             if (watched >= ceil) return { kind: "completed", icon: "✓", title: "Played - completed" };
-            if (watched > floor) return { kind: "partial", icon: "◐", title: `Partial - ${fmtTime(Math.floor(watched))} of ${fmtTime(Math.floor(duration))}` };
+            if (watched > floor) return { kind: "partial", icon: "◐", title: `Partial - ${formatTime(Math.floor(watched))} of ${formatTime(Math.floor(duration))}` };
         }
     }
-    if (e.inPlaylist) return { kind: "queued", icon: "📥", title: "In playlist" };
+    if (entry.inPlaylist) return { kind: "queued", icon: "📥", title: "In playlist" };
     return null;
 }
 
-function fmtSize(n){
+function formatFileSize(n){
     n = Number(n) || 0;
     if (n < 1024) return `${n} B`;
     const u = ["KB", "MB", "GB", "TB"];
@@ -1245,87 +1410,118 @@ function fmtSize(n){
     return `${v.toFixed(v < 10 ? 1 : 0)} ${u[i]}`;
 }
 
-async function loadFbRoots(){
+//TODO: make a page loader & disable while transitioning
+async function loadFileBrowserRoots(){
     if (!sid) return;
     try{
-        const r = await apiGet("/api/files/roots");
-        const data = await r.json();
-        fbState.roots = Array.isArray(data) ? data : [];
-        if (fbState.roots.length === 1){
-            await loadFbDir(fbState.roots[0].id, "");
+        const response = await apiGet("/api/files/roots");
+        const data = await response.json();
+        fileBrowserState.roots = Array.isArray(data) ? data : [];
+        if (fileBrowserState.roots.length === 1){
+            await loadFileBrowserDirectory(fileBrowserState.roots[0].id, "");
         } else {
-            fbState.rootId = null;
-            fbState.rootLabel = "";
-            fbState.path = "";
-            fbState.entries = fbState.roots.map(x => ({ name: x.label, type: "root", rootId: x.id }));
-            renderFb();
+            fileBrowserState.rootId = null;
+            fileBrowserState.rootLabel = "";
+            fileBrowserState.path = "";
+            fileBrowserState.entries = fileBrowserState.roots.map(x => ({ name: x.label, type: "root", rootId: x.id }));
+            renderFileBrowser();
         }
     }catch(e){
         console.error("roots load failed", e);
-        fbState.entries = [];
-        renderFb();
+        fileBrowserState.entries = [];
+        renderFileBrowser();
     }
 }
 
-async function loadFbDir(rootId, path){
+function reconcileFileBrowserEntriesFromPlaylist(){
+    if (!Array.isArray(fileBrowserState.entries) || !fileBrowserState.entries.length) return;
+    const byUri = new Map();
+    const byId = new Map();
+    for (const it of playlistItems){
+        if (it.uri) byUri.set(it.uri, it);
+        if (it.id != null) byId.set(String(it.id), it);
+    }
+    for (const entry of fileBrowserState.entries){
+        if (entry.type !== "file") continue;
+        const match = (entry.uri && byUri.get(entry.uri)) || (entry.playlistId && byId.get(String(entry.playlistId))) || null;
+        if (match){
+            entry.inPlaylist = true;
+            if (match.id != null) entry.playlistId = String(match.id);
+            entry.isCurrent = !!match.isCurrent;
+            if (match.progress) entry.progress = Object.assign({}, match.progress);
+            else delete entry.progress;
+            if (match.duration && !entry.progress) entry.duration = match.duration;
+        } else {
+            delete entry.inPlaylist;
+            delete entry.playlistId;
+            delete entry.isCurrent;
+            delete entry.progress;
+        }
+    }
+}
+
+async function loadFileBrowserDirectory(rootId, path){
     if (!sid) return;
     try{
-        const r = await apiGet(`/api/files?root=${encodeURIComponent(rootId)}&path=${encodeURIComponent(path || "")}`);
-        const data = await r.json();
-        fbState.rootId = data.root.id;
-        fbState.rootLabel = data.root.label;
-        fbState.path = data.path || "";
-        fbState.entries = Array.isArray(data.entries) ? data.entries : [];
-        renderFb();
+        const response = await apiGet(`/api/files?root=${encodeURIComponent(rootId)}&path=${encodeURIComponent(path || "")}`);
+        const data = await response.json();
+        fileBrowserState.rootId = data.root.id;
+        fileBrowserState.rootLabel = data.root.label;
+        fileBrowserState.path = data.path || "";
+        fileBrowserState.entries = Array.isArray(data.entries) ? data.entries : [];
+        renderFileBrowser();
     }catch(e){
         console.error("dir load failed", e);
     }
 }
 
-function fbParentPath(p){
+function fileBrowserParentPath(p){
     if (!p) return "";
     const parts = p.split("/").filter(Boolean);
     parts.pop();
     return parts.join("/");
 }
 
-function fbChildPath(name){
-    return fbState.path ? `${fbState.path}/${name}` : name;
+function fileBrowserChildPath(name){
+    return fileBrowserState.path ? `${fileBrowserState.path}/${name}` : name;
 }
 
-function renderFbCrumbs(){
-    if (!fbCrumbsEl) return;
-    fbCrumbsEl.innerHTML = "";
+function renderFileBrowserBreadcrumbs(){
+    if (!fileBrowserCrumbsEl) return;
+    const sig = `${fileBrowserState.rootId || ""}|${fileBrowserState.path || ""}|${fileBrowserState.roots.length}|${fileBrowserState.rootLabel || ""}`;
+    if (fileBrowserCrumbsEl.dataset.sig === sig) return;
+    fileBrowserCrumbsEl.dataset.sig = sig;
+    fileBrowserCrumbsEl.innerHTML = "";
 
     const addCrumb = (label, onClick, isCurrent) => {
         const el = document.createElement(onClick ? "button" : "span");
-        el.className = "fb-crumb" + (isCurrent ? " current" : "");
+        el.className = "file-browser-crumb" + (isCurrent ? " current" : "");
         el.textContent = label;
         if (onClick){ el.type = "button"; el.addEventListener("click", onClick); }
-        fbCrumbsEl.appendChild(el);
+        fileBrowserCrumbsEl.appendChild(el);
     };
     const addSep = () => {
         const s = document.createElement("span");
-        s.className = "fb-crumb-sep"; s.textContent = "›";
-        fbCrumbsEl.appendChild(s);
+        s.className = "file-browser-crumb-sep"; s.textContent = "›";
+        fileBrowserCrumbsEl.appendChild(s);
     };
 
-    const multiRoot = fbState.roots.length > 1;
+    const multiRoot = fileBrowserState.roots.length > 1;
 
-    if (!fbState.rootId){
+    if (!fileBrowserState.rootId){
         addCrumb("Root", null, true);
         return;
     }
     if (multiRoot){
-        addCrumb("Root", () => loadFbRoots(), false);
+        addCrumb("Root", () => loadFileBrowserRoots(), false);
         addSep();
     }
 
-    const parts = (fbState.path || "").split("/").filter(Boolean);
+    const parts = (fileBrowserState.path || "").split("/").filter(Boolean);
     if (parts.length === 0){
-        addCrumb(fbState.rootLabel, null, true);
+        addCrumb(fileBrowserState.rootLabel, null, true);
     } else {
-        addCrumb(fbState.rootLabel, () => loadFbDir(fbState.rootId, ""), false);
+        addCrumb(fileBrowserState.rootLabel, () => loadFileBrowserDirectory(fileBrowserState.rootId, ""), false);
         let acc = "";
         parts.forEach((seg, i) => {
             addSep();
@@ -1335,113 +1531,199 @@ function renderFbCrumbs(){
                 addCrumb(seg, null, true);
             } else {
                 const target = acc;
-                addCrumb(seg, () => loadFbDir(fbState.rootId, target), false);
+                addCrumb(seg, () => loadFileBrowserDirectory(fileBrowserState.rootId, target), false);
             }
         });
     }
 }
 
-function renderFb(){
-    if (!fbItemsEl || !fbEmptyEl) return;
-    renderFbCrumbs();
-    fbItemsEl.innerHTML = "";
+function fileBrowserEntryKey(entry){
+    if (entry.type === "up") return "up";
+    if (entry.type === "root") return `root:${entry.rootId}`;
+    return `${entry.type}:${entry.name}`;
+}
 
-    const filter = (fbSearchEl && fbSearchEl.value || "").trim().toLowerCase();
-    const base = fbState.entries.filter(e => !filter || e.name.toLowerCase().includes(filter));
-    const multiRoot = fbState.roots.length > 1;
-    const inSubdir = !!fbState.rootId && !!fbState.path;
-    const atRootTop = !!fbState.rootId && !fbState.path;
+function buildFileBrowserRow(entry){
+    const li = document.createElement("li");
+    const isDirish = (entry.type === "dir" || entry.type === "root");
+    const isUp = (entry.type === "up");
+    li.className = "playlist-item file-browser-item" + (isDirish ? " dir" : "") + (isUp ? " up" : "");
+    li.tabIndex = 0;
+    li.setAttribute("role", "option");
+    li.dataset.key = fileBrowserEntryKey(entry);
+    li.dataset.type = entry.type;
+
+    const indicatorEl = document.createElement("span");
+    indicatorEl.className = "playlist-indicator";
+    indicatorEl.textContent = isUp ? "⬆" : (isDirish ? "📁" : "🎬");
+    li.appendChild(indicatorEl);
+
+    const name = document.createElement("span");
+    name.className = "playlist-name";
+    const nameValue = entry.name || "(untitled)";
+    name.textContent = nameValue;
+    name.title = nameValue;
+    li.appendChild(name);
+
+    const layout = window.uiConfig.layout || {};
+    const buttonsConfig = window.uiConfig.buttons || {};
+    const showSize = !(layout.showFileBrowserFileSize === false);
+    const showIndicator = !(layout.showFileBrowserFileIndicator === false);
+    const showAdd = !(buttonsConfig.addFile === false);
+    const showPlay = !(buttonsConfig.playFile === false);
+
+    if (entry.type === "file"){
+        const badge = document.createElement("span");
+        badge.className = "file-browser-status";
+        badge.hidden = true;
+        if (!showIndicator) badge.style.display = "none";
+        li.appendChild(badge);
+
+        const sizeEl = document.createElement("span");
+        sizeEl.className = "file-browser-size";
+        if (entry.size == null) sizeEl.hidden = true;
+        else sizeEl.textContent = formatFileSize(entry.size);
+        if (!showSize) sizeEl.style.display = "none";
+        li.appendChild(sizeEl);
+    }
+
+    if (isUp){
+        li.addEventListener("click", () => fileBrowserGoBack());
+    } else if (isDirish){
+        li.addEventListener("click", () => {
+            const type = li.dataset.type;
+            const name = li.dataset.entryName;
+            if (type === "root") loadFileBrowserDirectory(li.dataset.rootId, "");
+            else loadFileBrowserDirectory(fileBrowserState.rootId, fileBrowserChildPath(name));
+        });
+    } else {
+        const actions = document.createElement("span");
+        actions.className = "file-browser-actions";
+
+        if (showAdd){
+            const addBtn = document.createElement("button");
+            addBtn.className = "file-browser-btn add";
+            addBtn.type = "button";
+            addBtn.textContent = "➕";
+            addBtn.title = "Add to playlist";
+            addBtn.addEventListener("click", (ev) => { ev.stopPropagation(); filesAdd(li.dataset.entryName); });
+            actions.appendChild(addBtn);
+        }
+
+        if (showPlay){
+            const playBtn = document.createElement("button");
+            playBtn.className = "file-browser-btn play";
+            playBtn.type = "button";
+            playBtn.textContent = "▶";
+            playBtn.title = "Play now";
+            playBtn.addEventListener("click", (ev) => { ev.stopPropagation(); filesPlay(li.dataset.entryName); });
+            actions.appendChild(playBtn);
+        }
+
+        li.appendChild(actions);
+    }
+
+    updateFileBrowserRow(li, entry);
+    return li;
+}
+
+function updateFileBrowserRow(li, entry){
+    li.dataset.entryName = entry.name || "";
+    if (entry.type === "root" && entry.rootId) li.dataset.rootId = entry.rootId;
+
+    const name = li.querySelector(".playlist-name");
+    const nameValue = entry.name || "(untitled)";
+    if (name){
+        if (name.textContent !== nameValue) name.textContent = nameValue;
+        if (name.title !== nameValue) name.title = nameValue;
+    }
+
+    if (entry.type === "file"){
+        const badge = li.querySelector(".file-browser-status");
+        const st = fileStatus(entry);
+        if (badge){
+            if (st){
+                const cls = `file-browser-status ${st.kind}`;
+                if (badge.className !== cls) badge.className = cls;
+                if (badge.textContent !== st.icon) badge.textContent = st.icon;
+                if (badge.title !== st.title) badge.title = st.title;
+                if (badge.hidden) badge.hidden = false;
+            } else {
+                if (!badge.hidden) badge.hidden = true;
+            }
+        }
+        const sizeEl = li.querySelector(".file-browser-size");
+        if (sizeEl){
+            if (entry.size != null){
+                const text = formatFileSize(entry.size);
+                if (sizeEl.textContent !== text) sizeEl.textContent = text;
+                if (sizeEl.hidden) sizeEl.hidden = false;
+            } else if (!sizeEl.hidden){
+                sizeEl.hidden = true;
+            }
+        }
+    }
+}
+
+function renderFileBrowser(){
+    if (!fileBrowserItemsEl || !fileBrowserEmptyEl) return;
+    renderFileBrowserBreadcrumbs();
+
+    const filter = (fileBrowserSearchEl && fileBrowserSearchEl.value || "").trim().toLowerCase();
+    const base = fileBrowserState.entries.filter(entry => !filter || entry.name.toLowerCase().includes(filter));
+    const multiRoot = fileBrowserState.roots.length > 1;
+    const inSubdir = !!fileBrowserState.rootId && !!fileBrowserState.path;
+    const atRootTop = !!fileBrowserState.rootId && !fileBrowserState.path;
     const showUp = inSubdir || (atRootTop && multiRoot);
     const entries = showUp ? [{ name: "Up one level", type: "up" }, ...base] : base;
 
     if (!entries.length){
-        fbEmptyEl.style.display = "";
-        fbItemsEl.style.display = "none";
+        if (fileBrowserItemsEl.firstChild) fileBrowserItemsEl.innerHTML = "";
+        if (fileBrowserEmptyEl.style.display !== "") fileBrowserEmptyEl.style.display = "";
+        if (fileBrowserItemsEl.style.display !== "none") fileBrowserItemsEl.style.display = "none";
         return;
     }
-    fbEmptyEl.style.display = "none";
-    fbItemsEl.style.display = "";
+    if (fileBrowserEmptyEl.style.display !== "none") fileBrowserEmptyEl.style.display = "none";
+    if (fileBrowserItemsEl.style.display !== "") fileBrowserItemsEl.style.display = "";
 
-    for (const e of entries){
-        const li = document.createElement("li");
-        const isDirish = (e.type === "dir" || e.type === "root");
-        const isUp = (e.type === "up");
-        li.className = "playlist-item fb-item" + (isDirish ? " dir" : "") + (isUp ? " up" : "");
-        li.tabIndex = 0;
-        li.setAttribute("role", "option");
+    const existing = new Map();
+    for (const li of Array.from(fileBrowserItemsEl.children)){
+        if (li.dataset && li.dataset.key) existing.set(li.dataset.key, li);
+    }
 
-        const ind = document.createElement("span");
-        ind.className = "pl-indicator";
-        ind.textContent = isUp ? "⬆" : (isDirish ? "📁" : "🎬");
-        li.appendChild(ind);
+    const seen = new Set();
+    let cursor = fileBrowserItemsEl.firstChild;
 
-        const name = document.createElement("span");
-        name.className = "pl-name";
-        const nameValue = e.name || "(untitled)";
-        name.textContent = nameValue;
-        name.title = nameValue;
-        li.appendChild(name);
+    for (const entry of entries){
+        const key = fileBrowserEntryKey(entry);
+        seen.add(key);
 
-        if (e.type === "file"){
-            const st = fileStatus(e);
-            if (st){
-                const badge = document.createElement("span");
-                badge.className = `fb-status ${st.kind}`;
-                badge.textContent = st.icon;
-                badge.title = st.title;
-                li.appendChild(badge);
-            }
-            if (e.size != null){
-                const sz = document.createElement("span");
-                sz.className = "fb-size";
-                sz.textContent = fmtSize(e.size);
-                li.appendChild(sz);
-            }
-        }
-
-        if (isUp){
-            li.addEventListener("click", () => fbBack());
-        } else if (isDirish){
-            li.addEventListener("click", () => {
-                if (e.type === "root") loadFbDir(e.rootId, "");
-                else loadFbDir(fbState.rootId, fbChildPath(e.name));
-            });
+        let li = existing.get(key);
+        if (!li){
+            const fresh = buildFileBrowserRow(entry);
+            if (cursor) fileBrowserItemsEl.insertBefore(fresh, cursor);
+            else fileBrowserItemsEl.appendChild(fresh);
+            existing.set(key, fresh);
+            li = fresh;
         } else {
-            const actions = document.createElement("span");
-            actions.className = "fb-actions";
-
-            const addBtn = document.createElement("button");
-            addBtn.className = "fb-btn add";
-            addBtn.type = "button";
-            addBtn.textContent = "➕";
-            addBtn.title = "Add to playlist";
-            addBtn.addEventListener("click", (ev) => { ev.stopPropagation(); filesAdd(e.name); });
-
-            const playBtn = document.createElement("button");
-            playBtn.className = "fb-btn play";
-            playBtn.type = "button";
-            playBtn.textContent = "▶";
-            playBtn.title = "Play now";
-            playBtn.addEventListener("click", (ev) => { ev.stopPropagation(); filesPlay(e.name); });
-
-            actions.appendChild(addBtn);
-            actions.appendChild(playBtn);
-            li.appendChild(actions);
-
-            li.addEventListener("click", () => filesAdd(e.name));
+            updateFileBrowserRow(li, entry);
+            if (cursor !== li) fileBrowserItemsEl.insertBefore(li, cursor);
         }
+        cursor = li.nextSibling;
+    }
 
-        fbItemsEl.appendChild(li);
+    for (const [key, li] of existing){
+        if (!seen.has(key)) li.remove();
     }
 }
 
 async function filesAdd(name){
-    if (!sid || !fbState.rootId) return;
-    const rel = fbChildPath(name);
+    if (!sid || !fileBrowserState.rootId) return;
+    const rel = fileBrowserChildPath(name);
     setUiBusy(true, "Adding…");
     try{
-        const r = await apiGet(`/api/files/add?root=${encodeURIComponent(fbState.rootId)}&path=${encodeURIComponent(rel)}`);
-        const data = await r.json().catch(() => ({}));
+        const response = await apiGet(`/api/files/add?root=${encodeURIComponent(fileBrowserState.rootId)}&path=${encodeURIComponent(rel)}`);
+        const data = await response.json().catch(() => ({}));
         if (data.status === "already_present"){
             showToast(`Already in playlist: ${name}`, "info");
         } else {
@@ -1456,16 +1738,30 @@ async function filesAdd(name){
 }
 
 async function filesPlay(name){
-    if (!sid || !fbState.rootId) return;
-    const rel = fbChildPath(name);
+    if (!sid || !fileBrowserState.rootId) return;
+    const rel = fileBrowserChildPath(name);
+
+    const entry = fileBrowserState.entries.find(item => item.type === "file" && item.name === name);
+    let resumeAt = 0;
+    //const features = getUiConfigSafe().features || {};
+    const features = window.uiConfig.features || {};
+    if (entry && features.resumePrompt !== false && isSignificantProgress(entry)){
+        const choice = await openResumeModal(entry);
+        if (choice === "cancel") return;
+        if (choice === "resume"){
+            resumeAt = Math.max(0, Math.floor(Number(entry.progress.watched) || 0));
+        }
+    }
+
     setUiBusy(true, "Sending…");
     try{
-        const r = await apiGet(`/api/files/play?root=${encodeURIComponent(fbState.rootId)}&path=${encodeURIComponent(rel)}`);
-        const data = await r.json().catch(() => ({}));
+        const qs = `root=${encodeURIComponent(fileBrowserState.rootId)}&path=${encodeURIComponent(rel)}${resumeAt > 0 ? `&resume_at=${resumeAt}` : ""}`;
+        const response = await apiGet(`/api/files/play?${qs}`);
+        const data = await response.json().catch(() => ({}));
         if (data.status === "jumped"){
-            showToast(`Playing existing entry: ${name}`, "info");
+            showToast(resumeAt > 0 ? `Resuming: ${name}` : `Playing existing entry: ${name}`, "info");
         } else {
-            showToast(`Added & playing: ${name}`, "ok");
+            showToast(resumeAt > 0 ? `Resuming: ${name}` : `Added & playing: ${name}`, "ok");
         }
         closeFileBrowser();
         closePlaylist();
@@ -1477,24 +1773,27 @@ async function filesPlay(name){
     }
 }
 
-function fbBack(){
-    if (!fbState.rootId){ closeFileBrowser(); return; }
-    if (!fbState.path){
-        if (fbState.roots.length > 1) loadFbRoots();
+function fileBrowserGoBack(){
+    if (!fileBrowserState.rootId){ closeFileBrowser(); return; }
+    if (!fileBrowserState.path){
+        if (fileBrowserState.roots.length > 1) loadFileBrowserRoots();
         else closeFileBrowser();
         return;
     }
-    loadFbDir(fbState.rootId, fbParentPath(fbState.path));
+    loadFileBrowserDirectory(fileBrowserState.rootId, fileBrowserParentPath(fileBrowserState.path));
 }
 
-if (btnPlAddFiles) btnPlAddFiles.addEventListener("click", openFileBrowser);
-if (btnFbClose) btnFbClose.addEventListener("click", closeFileBrowser);
+if (btnPlaylistAddFiles) btnPlaylistAddFiles.addEventListener("click", openFileBrowser);
+if (btnFileBrowserClose) btnFileBrowserClose.addEventListener("click", closeFileBrowser);
+if (btnFileBrowserView) btnFileBrowserView.addEventListener("click", () => {
+    setFileBrowserViewMode(getFileBrowserViewMode() === "grid" ? "list" : "grid");
+});
 if (fileBrowserModal){
     fileBrowserModal.addEventListener("click", (e) => {
         if (e.target === fileBrowserModal) closeFileBrowser();
     });
 }
-if (fbSearchEl) fbSearchEl.addEventListener("input", () => renderFb());
+if (fileBrowserSearchEl) fileBrowserSearchEl.addEventListener("input", () => renderFileBrowser());
 
 async function fetchClients(){
     try{
@@ -1598,8 +1897,9 @@ function connectWS(){
                 playlistItems = Array.isArray(msg.data) ? msg.data : [];
                 window.__playlist = playlistItems;
                 renderPlaylist();
-                if (isFileBrowserOpen() && fbState.rootId){
-                    loadFbDir(fbState.rootId, fbState.path);
+                if (isFileBrowserOpen() && fileBrowserState.rootId){
+                    reconcileFileBrowserEntriesFromPlaylist();
+                    renderFileBrowser();
                 }
             }
         }catch{}
@@ -1607,8 +1907,8 @@ function connectWS(){
 }
 
 function setupKeyboardShortcuts(){
-    const cfg = getUiConfigSafe();
-    const enabled = !(cfg.features && cfg.features.keyboardEvents === false);
+    const features = window.uiConfig.features;
+    const enabled = !(features && features.keyboardEvents === false);
 
     if (window.__vlcKbHandler){
         document.removeEventListener("keydown", window.__vlcKbHandler, true);
@@ -1631,35 +1931,32 @@ function setupKeyboardShortcuts(){
         throttle.lastKey = key;
         throttle.last = now;
 
-        const cfg2 = getUiConfigSafe();
-        const btns = cfg2.buttons || {};
-        const feat = cfg2.features || {};
-        const allowSeeking = !(feat.allowSeeking === false);
-        const seekJumpsEnabled = !(btns.seekJumps === false);
+        const features = window.uiConfig.features || {};
+        const allowSeeking = !(features.allowSeeking === false);
 
         if (key === " " || key === "Spacebar"){
             e.preventDefault(); e.stopPropagation();
-            if (btnToggle && btnToggle.style.display !== "none") btnToggle.click();
+            sendApiCommand("toggle");
             return;
         }
         if (key === "n" || key === "N"){
-            if (btnNext && btnNext.style.display !== "none") btnNext.click();
+            sendApiCommand("next");
             return;
         }
         if (key === "p" || key === "P"){
-            if (btnPrev && btnPrev.style.display !== "none") btnPrev.click();
+            sendApiCommand("prev");
             return;
         }
         if (key === "q" || key === "Q"){
             if (isResumeOpen()) return;
-            const playlistAllowed = !(feat.playlistControl === false) && !(btns.playlist === false);
+            const playlistAllowed = !(features.playlistControl === false);
             if (!playlistAllowed) return;
             e.preventDefault(); e.stopPropagation();
             if (isPlaylistOpen()) closePlaylist(); else openPlaylist();
             return;
         }
 
-        if (!allowSeeking || !seekJumpsEnabled) return;
+        if (!allowSeeking) return;
 
         if (key === "ArrowLeft"){
             e.preventDefault(); e.stopPropagation();
@@ -1691,7 +1988,8 @@ startPolling();
         }
 
         await loadFrontendConfig();
-        applyThemeVars(getUiConfigSafe().theme);
+        //applyThemeVars(getUiConfigSafe().theme);
+        applyThemeVars(window.uiConfig.theme);
         applyUiConfigToDom();
         applyClockDefaultFromConfig();
 

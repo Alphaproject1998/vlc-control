@@ -25,6 +25,7 @@ def _env_flag(name: str, default: str) -> bool:
 FILE_BROWSE = _env_flag("FILE_BROWSE", "off")
 FILE_BROWSE_AUTO = _env_flag("FILE_BROWSE_AUTO", "yes")
 FILE_BROWSE_AUTO_RECURSIVE = _env_flag("FILE_BROWSE_AUTO_RECURSIVE", "no")
+FILE_BROWSE_LOG_ROOT_RELATIVE = _env_flag("FILE_BROWSE_LOG_ROOT_RELATIVE", "yes")
 
 _DEFAULT_EXTS = "mp4,mkv,avi,mov,webm,mp3,flac,ogg,m4a,opus,wav"
 FILE_BROWSE_EXTENSIONS: set[str] = {
@@ -145,7 +146,7 @@ def require_token() -> None:
         abort(403)
 
 
-def fmt_time(seconds: int) -> str:
+def format_time(seconds: int) -> str:
     seconds = max(0, int(seconds))
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
@@ -170,8 +171,8 @@ def _occupied_count_locked(now: float) -> int:
 
 
 def _seconds_until_next_seat_opens_locked(now: float) -> int:
-    occ = _occupied_count_locked(now)
-    if occ < MAX_CLIENTS:
+    occupied_count = _occupied_count_locked(now)
+    if occupied_count < MAX_CLIENTS:
         return 0
     if not _reserved:
         return 0
@@ -235,13 +236,13 @@ def _ws_send_safe(ws, payload: str) -> bool:
 def broadcast_clients() -> None:
     now = _now()
     with _lock:
-        occ = _occupied_count_locked(now)
+        occupied_count = _occupied_count_locked(now)
         payload = json.dumps({
             "type": "clients",
             "data": {
-                "clients": occ,
+                "clients": occupied_count,
                 "max": MAX_CLIENTS,
-                "open": occ < MAX_CLIENTS,
+                "open": occupied_count < MAX_CLIENTS,
                 "cooldown": _seconds_until_next_seat_opens_locked(now),
                 "grace": int(GRACE_SECONDS),
             }
@@ -360,13 +361,13 @@ def _update_session_progress(status: dict, items: list[dict]) -> None:
     state = (status.get("state") or "").lower()
     if state not in ("playing", "paused"):
         return
-    current = next((it for it in items if it.get("isCurrent")), None)
+    current = next((item for item in items if item.get("isCurrent")), None)
     if not current:
         return
-    pid = str(current.get("id") or "")
-    if not pid:
+    playlist_id = str(current.get("id") or "")
+    if not playlist_id:
         return
-    _session_progress[pid] = {
+    _session_progress[playlist_id] = {
         "watched": int(status.get("time") or 0),
         "duration": int(status.get("length") or 0),
     }
@@ -374,9 +375,9 @@ def _update_session_progress(status: dict, items: list[dict]) -> None:
 
 def _apply_progress(items: list[dict]) -> list[dict]:
     for item in items:
-        pid = str(item.get("id") or "")
-        if pid and pid in _session_progress:
-            item["progress"] = dict(_session_progress[pid])
+        playlist_id = str(item.get("id") or "")
+        if playlist_id and playlist_id in _session_progress:
+            item["progress"] = dict(_session_progress[playlist_id])
     return items
 
 
@@ -426,12 +427,12 @@ def broadcaster_loop() -> None:
                 if new_title and new_title != prev_title:
                     log_event("action", who="host", op="track_change", value=new_title)
 
-                t0 = int(_last_seen.get("time") or 0)
-                t1 = int(status.get("time") or 0)
-                if abs(t1 - t0) >= 3:
+                prev_time = int(_last_seen.get("time") or 0)
+                new_time = int(status.get("time") or 0)
+                if abs(new_time - prev_time) >= 3:
                     length_s = int(status.get("length") or 0)
-                    at_s = fmt_time(t1)
-                    len_s = fmt_time(length_s)
+                    at_s = format_time(new_time)
+                    len_s = format_time(length_s)
                     log_event("action", who="host", op="seek", at=at_s, length=len_s, value=f"{at_s}/{len_s}")
 
             _last_seen = status
@@ -455,39 +456,39 @@ def broadcaster_loop() -> None:
 
         playlist_payload: str | None = None
         try:
-            pl = read_playlist()
+            playlist_items = read_playlist()
             if status is not None:
-                _update_session_progress(status, pl)
-            pl = _apply_progress(pl)
-            _last_playlist = pl
+                _update_session_progress(status, playlist_items)
+            playlist_items = _apply_progress(playlist_items)
+            _last_playlist = playlist_items
 
             new_dir: str | None = None
             if FILE_BROWSE_AUTO:
                 found_current = False
-                for it in pl:
-                    if not it.get("isCurrent"):
+                for item in playlist_items:
+                    if not item.get("isCurrent"):
                         continue
                     found_current = True
-                    uri = it.get("uri") or ""
+                    uri = item.get("uri") or ""
                     if uri.startswith("file://"):
-                        p = unquote(urlparse(uri).path)
-                        d = os.path.dirname(p)
-                        if os.path.isdir(d):
-                            new_dir = os.path.realpath(d)
+                        path = unquote(urlparse(uri).path)
+                        dir_path = os.path.dirname(path)
+                        if os.path.isdir(dir_path):
+                            new_dir = os.path.realpath(dir_path)
                         else:
-                            _note_auto_miss("not_a_dir", uri=uri, dir=d)
+                            _note_auto_miss("not_a_dir", uri=uri, dir=dir_path)
                     else:
                         _note_auto_miss("not_file_uri", uri=uri)
                     break
-                if not found_current and pl:
+                if not found_current and playlist_items:
                     _note_auto_miss("no_current")
             if new_dir != _current_playing_dir_cache:
                 _current_playing_dir_cache = new_dir
 
-            pl_json = json.dumps(pl, sort_keys=True)
-            if pl_json != _last_playlist_json:
-                _last_playlist_json = pl_json
-                playlist_payload = json.dumps({"type": "playlist", "data": pl})
+            playlist_json = json.dumps(playlist_items, sort_keys=True)
+            if playlist_json != _last_playlist_json:
+                _last_playlist_json = playlist_json
+                playlist_payload = json.dumps({"type": "playlist", "data": playlist_items})
         except Exception:
             pass
 
@@ -521,8 +522,8 @@ def toggle():
 
     op = "toggle"
     try:
-        st = read_status_dict()
-        state = (st.get("state") or "unknown")
+        status = read_status_dict()
+        state = (status.get("state") or "unknown")
         if state == "playing":
             op = "play"
         elif state == "paused":
@@ -592,8 +593,8 @@ def seek():
             target = int(val)
 
         target = max(0, min(length, target))
-        at_s = fmt_time(target)
-        len_s = fmt_time(length)
+        at_s = format_time(target)
+        len_s = format_time(length)
         pretty_value = f"{at_s}/{len_s}"
     except Exception:
         pass
@@ -614,10 +615,10 @@ def status():
     return jsonify(read_status_dict())
 
 
-def _playlist_name_for_id(items: list[dict], pid: str) -> str:
-    for it in items:
-        if it.get("id") == pid:
-            return it.get("name") or ""
+def _playlist_name_for_id(items: list[dict], playlist_id: str) -> str:
+    for item in items:
+        if item.get("id") == playlist_id:
+            return item.get("name") or ""
     return ""
 
 
@@ -633,8 +634,8 @@ def playlist_play():
     require_token()
     _, cid = require_sid()
 
-    pid = request.args.get("id", "").strip()
-    if not pid:
+    playlist_id = request.args.get("id", "").strip()
+    if not playlist_id:
         abort(400, "Missing id")
 
     resume_at_raw = request.args.get("resume_at", "").strip()
@@ -648,26 +649,26 @@ def playlist_play():
     name = ""
     total = 0
     try:
-        for it in read_playlist():
-            if it.get("id") == pid:
-                name = it.get("name") or ""
-                total = int(it.get("duration") or 0)
+        for item in read_playlist():
+            if item.get("id") == playlist_id:
+                name = item.get("name") or ""
+                total = int(item.get("duration") or 0)
                 break
     except Exception:
         pass
 
-    mark_api_action("playlist_resume" if resume_at > 0 else "playlist_skip", cid=cid, value=pid)
-    vlc_get("/requests/status.xml", params={"command": "pl_play", "id": pid})
+    mark_api_action("playlist_resume" if resume_at > 0 else "playlist_skip", cid=cid, value=playlist_id)
+    vlc_get("/requests/status.xml", params={"command": "pl_play", "id": playlist_id})
     if resume_at > 0:
         time.sleep(0.25)
         vlc_get("/requests/status.xml", params={"command": "seek", "val": str(resume_at)})
-        mark_api_action("playlist_resume", cid=cid, value=f"{pid}@{resume_at}")
-        at_s = fmt_time(resume_at)
-        len_s = fmt_time(total) if total > 0 else "?"
+        mark_api_action("playlist_resume", cid=cid, value=f"{playlist_id}@{resume_at}")
+        at_s = format_time(resume_at)
+        len_s = format_time(total) if total > 0 else "?"
         log_event("action", who="web", cid=cid, op="playlist_resume",
-                  at=at_s, length=len_s, value=f"{(name or pid)} - {at_s} / {len_s}")
+                  at=at_s, length=len_s, value=f"{(name or playlist_id)} - {at_s} / {len_s}")
     else:
-        log_event("action", who="web", cid=cid, op="playlist_skip", value=(name or pid))
+        log_event("action", who="web", cid=cid, op="playlist_skip", value=(name or playlist_id))
     return "ok"
 
 
@@ -676,19 +677,19 @@ def playlist_remove():
     require_token()
     _, cid = require_sid()
 
-    pid = request.args.get("id", "").strip()
-    if not pid:
+    playlist_id = request.args.get("id", "").strip()
+    if not playlist_id:
         abort(400, "Missing id")
 
     name = ""
     try:
-        name = _playlist_name_for_id(read_playlist(), pid)
+        name = _playlist_name_for_id(read_playlist(), playlist_id)
     except Exception:
         pass
 
-    vlc_get("/requests/status.xml", params={"command": "pl_delete", "id": pid})
-    mark_api_action("playlist_remove", cid=cid, value=pid)
-    log_event("action", who="web", cid=cid, op="playlist_remove", value=(name or pid))
+    vlc_get("/requests/status.xml", params={"command": "pl_delete", "id": playlist_id})
+    mark_api_action("playlist_remove", cid=cid, value=playlist_id)
+    log_event("action", who="web", cid=cid, op="playlist_remove", value=(name or playlist_id))
     return "ok"
 
 
@@ -743,33 +744,44 @@ def _current_playing_dir() -> str | None:
 
 
 def _now_playing_dir_realpath() -> str | None:
-    for it in _last_playlist:
-        if not it.get("isCurrent"):
+    for item in _last_playlist:
+        if not item.get("isCurrent"):
             continue
-        uri = it.get("uri") or ""
+        uri = item.get("uri") or ""
         if not uri.startswith("file://"):
             return None
-        p = unquote(urlparse(uri).path)
-        d = os.path.dirname(p)
-        return os.path.realpath(d) if os.path.isdir(d) else None
+        path = unquote(urlparse(uri).path)
+        dir_path = os.path.dirname(path)
+        return os.path.realpath(dir_path) if os.path.isdir(dir_path) else None
     return None
 
 
-def _log_file_value(full: str) -> str:
+def _log_file_value(root_id: str, rel: str, full: str) -> str:
+    if FILE_BROWSE_LOG_ROOT_RELATIVE:
+        root_info = _resolve_root(root_id)
+        if root_info:
+            _label, root, _rec = root_info
+            root_name = os.path.basename(root.rstrip(os.sep)) or root.strip(os.sep) or "root"
+            rel_clean = (rel or "").strip("/")
+            return f"/{root_name}/{rel_clean}" if rel_clean else f"/{root_name}"
+        return full
+
     playing_dir = _now_playing_dir_realpath()
-    if playing_dir and os.path.realpath(os.path.dirname(full)) == playing_dir:
-        return os.path.basename(full)
+    if playing_dir:
+        real_full = os.path.realpath(full)
+        if real_full == playing_dir or real_full.startswith(playing_dir + os.sep):
+            return os.path.relpath(real_full, playing_dir)
     return full
 
 
-def _resolve_root(rid: str) -> tuple[str, str, bool] | None:
-    if rid == "auto":
-        d = _current_playing_dir()
-        return ("Now playing folder", d, FILE_BROWSE_AUTO_RECURSIVE) if d else None
-    if not rid.startswith("r"):
+def _resolve_root(root_id: str) -> tuple[str, str, bool] | None:
+    if root_id == "auto":
+        dir_path = _current_playing_dir()
+        return ("Now playing folder", dir_path, FILE_BROWSE_AUTO_RECURSIVE) if dir_path else None
+    if not root_id.startswith("r"):
         return None
     try:
-        idx = int(rid[1:])
+        idx = int(root_id[1:])
     except ValueError:
         return None
     if 0 <= idx < len(_FILE_ROOTS):
@@ -800,8 +812,8 @@ def _ext_allowed(name: str) -> bool:
     return _ext_of(name) in FILE_BROWSE_EXTENSIONS
 
 
-def _path_to_uri(p: str) -> str:
-    return "file://" + quote(p)
+def _path_to_uri(path: str) -> str:
+    return "file://" + quote(path)
 
 
 def _list_dir(full: str, rel: str, *, allow_sub: bool = True) -> list[dict]:
@@ -815,18 +827,18 @@ def _list_dir(full: str, rel: str, *, allow_sub: bool = True) -> list[dict]:
     base_parts = [s for s in rel_norm.split("/") if s]
 
     uri_index: dict[str, dict] = {}
-    for it in _last_playlist:
-        u = it.get("uri") or ""
-        if u:
-            uri_index[u] = it
+    for item in _last_playlist:
+        uri = item.get("uri") or ""
+        if uri:
+            uri_index[uri] = item
 
     for name in names:
         if name.startswith("."):
             continue
         lo = name.lower()
-        p = os.path.join(full, name)
+        path = os.path.join(full, name)
         try:
-            if os.path.isdir(p):
+            if os.path.isdir(path):
                 if not allow_sub:
                     continue
                 if _is_blacklisted_term(name):
@@ -834,28 +846,29 @@ def _list_dir(full: str, rel: str, *, allow_sub: bool = True) -> list[dict]:
                 if _is_blacklisted_dir_path(base_parts + [lo]):
                     continue
                 entries.append({"name": name, "type": "dir"})
-            elif os.path.isfile(p) and _ext_allowed(name):
+            elif os.path.isfile(path) and _ext_allowed(name):
                 if _is_blacklisted_term(name):
                     continue
+                uri = _path_to_uri(path)
                 entry = {
                     "name": name,
                     "type": "file",
                     "ext": _ext_of(name),
-                    "size": os.path.getsize(p),
+                    "size": os.path.getsize(path),
+                    "uri": uri,
                 }
-                uri = _path_to_uri(p)
-                it = uri_index.get(uri)
-                if it:
-                    pid = str(it.get("id") or "")
+                item = uri_index.get(uri)
+                if item:
+                    playlist_id = str(item.get("id") or "")
                     entry["inPlaylist"] = True
-                    if pid:
-                        entry["playlistId"] = pid
-                    if it.get("isCurrent"):
+                    if playlist_id:
+                        entry["playlistId"] = playlist_id
+                    if item.get("isCurrent"):
                         entry["isCurrent"] = True
-                    if pid and pid in _session_progress:
-                        entry["progress"] = dict(_session_progress[pid])
-                    if not entry.get("progress") and it.get("duration"):
-                        entry["duration"] = int(it.get("duration") or 0)
+                    if playlist_id and playlist_id in _session_progress:
+                        entry["progress"] = dict(_session_progress[playlist_id])
+                    if not entry.get("progress") and item.get("duration"):
+                        entry["duration"] = int(item.get("duration") or 0)
                 entries.append(entry)
         except OSError:
             continue
@@ -883,46 +896,46 @@ def files_list():
     require_sid()
     _require_file_browse()
 
-    rid = request.args.get("root", "").strip()
+    root_id = request.args.get("root", "").strip()
     rel = request.args.get("path", "").strip()
 
-    r = _resolve_root(rid)
-    if not r:
+    root_info = _resolve_root(root_id)
+    if not root_info:
         abort(404)
-    label, root, recursive = r
+    label, root, recursive = root_info
 
     full = _safe_join(root, rel, allow_sub=recursive)
     if full is None or not os.path.isdir(full):
         abort(404)
 
     return jsonify({
-        "root": {"id": rid, "label": label, "recursive": recursive},
+        "root": {"id": root_id, "label": label, "recursive": recursive},
         "path": rel.strip("/"),
         "entries": _list_dir(full, rel, allow_sub=recursive),
     })
 
 
 def _resolve_file_arg() -> tuple[str, str, str]:
-    rid = request.args.get("root", "").strip()
+    root_id = request.args.get("root", "").strip()
     rel = request.args.get("path", "").strip()
 
-    r = _resolve_root(rid)
-    if not r:
+    root_info = _resolve_root(root_id)
+    if not root_info:
         abort(404)
-    _label, root, recursive = r
+    _label, root, recursive = root_info
 
     full = _safe_join(root, rel, allow_sub=recursive)
     if full is None or not os.path.isfile(full) or not _ext_allowed(os.path.basename(full)):
         abort(404)
 
-    return rid, rel, full
+    return root_id, rel, full
 
 
 def _playlist_find_by_uri(uri: str) -> str | None:
-    for it in _last_playlist:
-        if it.get("uri") == uri:
-            pid = it.get("id")
-            return str(pid) if pid else None
+    for item in _last_playlist:
+        if item.get("uri") == uri:
+            playlist_id = item.get("id")
+            return str(playlist_id) if playlist_id else None
     return None
 
 
@@ -932,7 +945,7 @@ def files_add():
     _, cid = require_sid()
     _require_file_browse()
 
-    _rid, rel, full = _resolve_file_arg()
+    root_id, rel, full = _resolve_file_arg()
     uri = _path_to_uri(full)
 
     existing = _playlist_find_by_uri(uri)
@@ -941,7 +954,7 @@ def files_add():
 
     vlc_get("/requests/status.xml", params={"command": "in_enqueue", "input": uri})
     mark_api_action("files_add", cid=cid, value=rel)
-    log_event("action", who="web", cid=cid, op="files_add", value=_log_file_value(full))
+    log_event("action", who="web", cid=cid, op="files_add", value=_log_file_value(root_id, rel, full))
     return jsonify({"status": "added"})
 
 
@@ -951,19 +964,41 @@ def files_play():
     _, cid = require_sid()
     _require_file_browse()
 
-    _rid, rel, full = _resolve_file_arg()
+    root_id, rel, full = _resolve_file_arg()
     uri = _path_to_uri(full)
+
+    resume_at_raw = request.args.get("resume_at", "").strip()
+    resume_at = 0
+    if resume_at_raw:
+        try:
+            resume_at = max(0, int(resume_at_raw))
+        except ValueError:
+            abort(400, "Invalid resume_at")
 
     existing = _playlist_find_by_uri(uri)
     if existing:
         vlc_get("/requests/status.xml", params={"command": "pl_play", "id": existing})
-        mark_api_action("files_play_existing", cid=cid, value=existing)
-        log_event("action", who="web", cid=cid, op="files_play_existing", value=os.path.basename(full))
+        if resume_at > 0:
+            time.sleep(0.25)
+            vlc_get("/requests/status.xml", params={"command": "seek", "val": str(resume_at)})
+            mark_api_action("files_play_resume_existing", cid=cid, value=f"{existing}@{resume_at}")
+            log_event("action", who="web", cid=cid, op="files_play_resume_existing",
+                      at=format_time(resume_at), value=f"{os.path.basename(full)} - {format_time(resume_at)}")
+        else:
+            mark_api_action("files_play_existing", cid=cid, value=existing)
+            log_event("action", who="web", cid=cid, op="files_play_existing", value=os.path.basename(full))
         return jsonify({"status": "jumped", "id": existing})
 
     vlc_get("/requests/status.xml", params={"command": "in_play", "input": uri})
-    mark_api_action("files_play", cid=cid, value=rel)
-    log_event("action", who="web", cid=cid, op="files_play", value=_log_file_value(full))
+    if resume_at > 0:
+        time.sleep(0.25)
+        vlc_get("/requests/status.xml", params={"command": "seek", "val": str(resume_at)})
+        mark_api_action("files_play_resume", cid=cid, value=f"{rel}@{resume_at}")
+        log_event("action", who="web", cid=cid, op="files_play_resume",
+                  at=format_time(resume_at), value=f"{_log_file_value(root_id, rel, full)} - {format_time(resume_at)}")
+    else:
+        mark_api_action("files_play", cid=cid, value=rel)
+        log_event("action", who="web", cid=cid, op="files_play", value=_log_file_value(root_id, rel, full))
     return jsonify({"status": "added_and_played"})
 
 
@@ -974,22 +1009,22 @@ def clients():
 
     now = _now()
     with _lock:
-        occ = _occupied_count_locked(now)
+        occupied_count = _occupied_count_locked(now)
         cooldown = _seconds_until_next_seat_opens_locked(now)
-        resp = {
-            "clients": occ,
+        response = {
+            "clients": occupied_count,
             "max": MAX_CLIENTS,
-            "open": occ < MAX_CLIENTS,
+            "open": occupied_count < MAX_CLIENTS,
             "cooldown": cooldown,
             "grace": int(GRACE_SECONDS),
         }
 
         if cid:
             ok, reason = _can_admit_locked(cid, now)
-            resp["admit_for_cid"] = bool(ok)
-            resp["reason"] = reason
+            response["admit_for_cid"] = bool(ok)
+            response["reason"] = reason
 
-    return jsonify(resp)
+    return jsonify(response)
 
 
 @sock.route("/ws")
@@ -1010,7 +1045,7 @@ def ws_route(ws):
     now = _now()
     with _lock:
         ok, reason = _can_admit_locked(cid, now)
-        occ = _occupied_count_locked(now)
+        occupied_count = _occupied_count_locked(now)
         cooldown = _seconds_until_next_seat_opens_locked(now)
 
         if not ok:
@@ -1018,7 +1053,7 @@ def ws_route(ws):
                 ws.send(json.dumps({
                     "type": "clients",
                     "data": {
-                        "clients": occ,
+                        "clients": occupied_count,
                         "max": MAX_CLIENTS,
                         "open": False,
                         "cooldown": cooldown,
@@ -1026,7 +1061,7 @@ def ws_route(ws):
                     }
                 }))
                 ws.send(json.dumps({"type": "error", "message": "server full"}))
-                log_event("client_reject", cid=cid, reason="server_full", clients=occ, max=MAX_CLIENTS, cooldown=cooldown)
+                log_event("client_reject", cid=cid, reason="server_full", clients=occupied_count, max=MAX_CLIENTS, cooldown=cooldown)
             finally:
                 return
 

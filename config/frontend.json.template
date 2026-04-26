@@ -39,7 +39,7 @@
     "showFileBrowserSearch": true,
     "showFileBrowserFileSize": true,
     "showFileBrowserFileIcons": true,
-    "showFileBrowserFileIndicators": true,
+    "showFileBrowserFileIndicator": true,
     "showFileBrowserFoldersGrouped": true,
     "showFileBrowserSelectMulti": true
   },

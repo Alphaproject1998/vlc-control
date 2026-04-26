@@ -28,14 +28,14 @@
     </header>
 
     <div class="content">
-      <div class="now">
+      <div id="nowPlaying">
         <div class="label">Now playing</div>
         <div class="title" id="title">Waiting for a slot…</div>
 
-        <div class="progress-wrap" id="pwrap">
-          <div class="preview" id="preview">Seek to 0:00</div>
-          <input id="progress" type="range" min="0" max="1000" value="0" />
-          <div class="meta">
+        <div class="seek-bar-wrap" id="seekBarWrap">
+          <div class="seek-preview" id="seekPreview">Seek to 0:00</div>
+          <input id="seekBar" type="range" min="0" max="1000" value="0" />
+          <div id="nowPlayingMeta">
             <div class="chips">
               <span class="chip" id="state">state: locked</span>
               <span class="chip" id="clock" title="Click to toggle remaining time" style="cursor:pointer;">0:00 / 0:00</span>
@@ -60,8 +60,8 @@
       </div>
 
       <div class="status">
-        <span id="out">Waiting…</span>
-        <span class="pill" id="pill">WAIT</span>
+        <span id="statusText">Waiting…</span>
+        <span class="status-pill" id="statusPill">WAIT</span>
       </div>
 
       <div class="foot" id="footerText">Tip: keep the link private.</div>
@@ -73,13 +73,13 @@
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="playlistModalTitle">
     <div class="modal-header">
       <h2 id="playlistModalTitle">Playlist</h2>
-      <button class="icon-btn" id="btnPlClose" aria-label="Close">✕</button>
+      <button class="icon-btn" id="btnPlaylistClose" aria-label="Close">✕</button>
     </div>
     <ul class="playlist-list" id="playlistItems"></ul>
     <div class="playlist-empty" id="playlistEmpty">Playlist is empty.</div>
     <div id="playlistModalFooter" class="modal-footer">
-      <button id="btnPlAddFiles">➕ <span>Add files</span></button>
-      <button class="danger" id="btnPlClear">Clear playlist</button>
+      <button id="btnPlaylistAddFiles">➕ <span>Add files</span></button>
+      <button class="danger" id="btnPlaylistClear">Clear playlist</button>
     </div>
   </div>
 </div>
@@ -88,14 +88,15 @@
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="fileBrowserTitle">
     <div class="modal-header">
       <h2 id="fileBrowserTitle">Add files</h2>
-      <button class="icon-btn" id="btnFbClose" aria-label="Close">✕</button>
+      <button class="icon-btn" id="btnFileBrowserClose" aria-label="Close">✕</button>
     </div>
-    <div class="fb-toolbar">
-      <div class="fb-crumbs" id="fbCrumbs"></div>
-      <input type="search" class="fb-search" id="fbSearch" placeholder="Filter…" autocomplete="off" />
+    <div class="file-browser-toolbar">
+      <div class="file-browser-crumbs" id="fileBrowserCrumbs"></div>
+      <input type="search" class="file-browser-search" id="fileBrowserSearch" placeholder="Filter…" autocomplete="off" />
+      <button class="icon-btn file-browser-view-toggle" id="btnFileBrowserView" type="button" aria-label="Toggle grid / list view" title="Toggle grid / list view">▦</button>
     </div>
-    <ul class="playlist-list fb-list" id="fbItems"></ul>
-    <div class="playlist-empty" id="fbEmpty">Nothing here.</div>
+    <ul class="playlist-list file-browser-list" id="fileBrowserItems"></ul>
+    <div class="playlist-empty" id="fileBrowserEmpty">Nothing here.</div>
   </div>
 </div>
 
