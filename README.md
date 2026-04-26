@@ -261,6 +261,7 @@ If you plan to run this software with friends, this is for you.
 **Commercial/Public use:** If you run a public service or commercial
 offering based on modifications, you must provide source code to users
 (per AGPLv3). You cannot run a proprietary SaaS version.
+
 ---
 
 Created by **Alphaproject**.
