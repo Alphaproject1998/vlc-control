@@ -40,7 +40,7 @@
     "showFileBrowserFileSize": true,
     "showFileBrowserFileIcons": true,
     "showFileBrowserFileIndicator": true,
-    "showFileBrowserFoldersGrouped": true,
+    "showFileBrowserFilesGrouped": true,
     "showFileBrowserSelectMulti": true
   },
   "buttons": {
@@ -64,6 +64,8 @@
     "resumePrompt": true,
     "removePrompt": true,
     "playlistUndo": true
+    "playlistSelectMulti": true
+    "fileBrowserSelectMulti": true
   },
   "config": {
     "seekJumpBy": 10,

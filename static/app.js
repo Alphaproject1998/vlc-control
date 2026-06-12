@@ -30,14 +30,14 @@ window.uiConfig = window.uiConfig || {
         showPlaylistProgressEntries: true,
         showPlaylistProgressTime: true,
         showPlaylistProgressTimeResume: true,
-        showPlaylistSelectMulti: true, //TODO: Checkbox to multi select, when multi selected dropdown on bottom left? "With Selected"
+        showPlaylistSelectMulti: true,
         showFileBrowser: true,
         showFileBrowserSearch: true,
         showFileBrowserFileSize: true,
-        showFileBrowserFileIcons: true, //TODO: File Icons Toggle
+        showFileBrowserFileIcons: true,
         showFileBrowserFileIndicator: true,
-        showFileBrowserFoldersGrouped: true, //TODO: Make and toggle: when true each of the folders/directories are grouped away from the other files so when icons are not showing it is clear
-        showFileBrowserSelectMulti: true //TODO: Checkbox to multi select, when multi selected dropdown on bottom left? "With Selected"
+        showFileBrowserFilesGrouped: true,
+        showFileBrowserSelectMulti: true
     },
     buttons: {
         playPause: true,
@@ -58,10 +58,10 @@ window.uiConfig = window.uiConfig || {
         playlistControl: true,
         fileBrowser: true,
         resumePrompt: true,
-        removePrompt: true, //TODO: Make a whole "are you sure you want to remove" prompt, this is the toggle.
+        removePrompt: true,
         playlistUndo: true, //TODO: Undo system, this is the toggle
-        playlistSelectMulti: true, //TODO: multiselect toggle
-        fileBrowserSelectMulti: true //TODO: multiselect toggle
+        playlistSelectMulti: true,
+        fileBrowserSelectMulti: true
     },
     config: {
         seekJumpBy: 10,
@@ -73,6 +73,11 @@ window.uiConfig = window.uiConfig || {
         fileBrowserAsGrid: false
     }
 };
+
+let playlistMultiActive = false;
+const playlistSelected = new Set();
+let fileBrowserMultiActive = false;
+const fileBrowserSelected = new Set();
 
 //function getUiConfigSafe(){
 //    return (typeof window !== "undefined" && window.uiConfig) ? window.uiConfig : {};
@@ -235,6 +240,19 @@ function applyUiConfigToDom(){
         ["btnPrev","btnNext"],
         ["btnBack","btnFwd"],
     ]);
+
+    const canRemove = !(features.playlistControl === false) && !(buttonsConfig.removeTrack === false);
+    const canAdd = !(buttonsConfig.addFile === false);
+    if (fileBrowserWithSelectedEl){
+        const addOpt = fileBrowserWithSelectedEl.querySelector("option[value='add']");
+        const removeOpt = fileBrowserWithSelectedEl.querySelector("option[value='remove']");
+        if (addOpt) addOpt.hidden = !canAdd;
+        if (removeOpt) removeOpt.hidden = !canRemove;
+    }
+    if (playlistWithSelectedEl){
+        const removeOpt = playlistWithSelectedEl.querySelector("option[value='remove']");
+        if (removeOpt) removeOpt.hidden = !canRemove;
+    }
 }
 
 async function loadFrontendConfig(){
@@ -704,6 +722,10 @@ const playlistEmptyEl = document.getElementById("playlistEmpty");
 const btnPlaylistClose = document.getElementById("btnPlaylistClose");
 const btnPlaylistClear = document.getElementById("btnPlaylistClear");
 const playlistCountChip = document.getElementById("playlistCountChip");
+const playlistMultiselectBarEl = document.getElementById("playlistMultiselectBar");
+const playlistMultiselectCheckEl = document.getElementById("playlistMultiselectCheck");
+const playlistSelectAllEl = document.getElementById("playlistSelectAll");
+const playlistWithSelectedEl = document.getElementById("playlistWithSelected");
 
 function canOpenPlaylist(){
     return !(window.uiConfig.features?.playlistControl === false);
@@ -733,6 +755,7 @@ function openPlaylist() {
 function closePlaylist() {
     if(!playlistModal) return;
     playlistModal.hidden = true;
+    if (playlistMultiActive) exitPlaylistMulti();
 }
 function isPlaylistOpen(){ return playlistModal && !playlistModal.hidden; }
 
@@ -988,19 +1011,33 @@ function buildPlaylistRow(item, shape, playbackState, controlEnabled, showRemove
         removeBtn.textContent = "✕";
         removeBtn.addEventListener("click", (e) => {
             e.stopPropagation();
+            const features = window.uiConfig.features || {};
+            if (!(features.removePrompt === false)){
+                const itemName = li.querySelector(".playlist-name")?.textContent || "this item";
+                if (!confirm(`Remove "${itemName}" from playlist?`)) return;
+            }
             playlistRemove(li.dataset.id);
         });
         li.appendChild(removeBtn);
     }
 
-    if (controlEnabled && !isActiveRow){
-        li.addEventListener("click", () => {
+    li.addEventListener("click", (e) => {
+        if (e.shiftKey && playlistMultiAvailable()){
+            e.stopPropagation();
+            enterPlaylistMulti();
+            togglePlaylistItem(li.dataset.id);
+            return;
+        }
+        if (playlistMultiActive){
+            togglePlaylistItem(li.dataset.id);
+            return;
+        }
+        if (controlEnabled && !isActiveRow){
             const cur = playlistItems.find(it => String(it.id) === li.dataset.id);
             if (cur) requestPlaylistPlay(cur);
-        });
-    } else if (!controlEnabled){
-        li.style.cursor = "default";
-    }
+        }
+    });
+    if (!controlEnabled && !playlistMultiAvailable()) li.style.cursor = "default";
 
     return li;
 }
@@ -1027,6 +1064,114 @@ function updatePlaylistRow(li, item, playbackState, showProgressTime, showResume
     }
 }
 
+function playlistMultiAvailable(){
+    if (window.uiConfig.features?.playlistSelectMulti === false) return false;
+    const features = window.uiConfig.features || {};
+    const buttons = window.uiConfig.buttons || {};
+    return !(features.playlistControl === false) && !(buttons.removeTrack === false);
+}
+
+function updatePlaylistMultiToolbar(){
+    if (!playlistMultiselectBarEl) return;
+    const layout = window.uiConfig.layout || {};
+    const available = playlistMultiAvailable();
+    const showCheckbox = available && !(layout.showPlaylistSelectMulti === false);
+    const hasContent = playlistItems.length > 0;
+    const showBar = (showCheckbox && hasContent) || playlistMultiActive;
+    playlistMultiselectBarEl.hidden = !showBar;
+    playlistMultiselectBarEl.classList.toggle("is-overlay", playlistMultiActive && !showCheckbox);
+
+    if (playlistMultiselectCheckEl) {
+        const labelEl = playlistMultiselectCheckEl.closest("label");
+        if (labelEl) labelEl.style.display = showCheckbox ? "" : "none";
+    }
+    const showControls = playlistMultiActive;
+    if (playlistSelectAllEl) {
+        playlistSelectAllEl.style.display = showControls ? "" : "none";
+        const allCount = playlistItems.length;
+        playlistSelectAllEl.textContent = (playlistSelected.size > 0 && playlistSelected.size === allCount) ? "Deselect all" : "Select all";
+    }
+    if (playlistWithSelectedEl) {
+        playlistWithSelectedEl.style.display = showControls ? "" : "none";
+        playlistWithSelectedEl.disabled = playlistSelected.size === 0;
+    }
+}
+
+function enterPlaylistMulti(){
+    if (!playlistMultiAvailable()) return;
+    playlistMultiActive = true;
+    playlistSelected.clear();
+    if (playlistMultiselectCheckEl) playlistMultiselectCheckEl.checked = true;
+    if (playlistItemsEl) playlistItemsEl.classList.add("multiselect-active");
+    updatePlaylistMultiToolbar();
+}
+
+function exitPlaylistMulti(){
+    playlistMultiActive = false;
+    playlistSelected.clear();
+    if (playlistMultiselectCheckEl) playlistMultiselectCheckEl.checked = false;
+    if (playlistItemsEl) playlistItemsEl.classList.remove("multiselect-active");
+    if (playlistItemsEl) {
+        for (const li of playlistItemsEl.querySelectorAll(".is-selected")) li.classList.remove("is-selected");
+    }
+    updatePlaylistMultiToolbar();
+}
+
+function togglePlaylistItem(id){
+    if (playlistSelected.has(id)) playlistSelected.delete(id);
+    else playlistSelected.add(id);
+    if (playlistItemsEl) {
+        const li = playlistItemsEl.querySelector(`li[data-id="${CSS.escape(id)}"]`);
+        if (li) li.classList.toggle("is-selected", playlistSelected.has(id));
+    }
+    updatePlaylistMultiToolbar();
+}
+
+function selectAllPlaylistItems(){
+    if (playlistSelected.size > 0 && playlistSelected.size === playlistItems.length){
+        playlistSelected.clear();
+        if (playlistItemsEl) {
+            for (const li of playlistItemsEl.querySelectorAll(".is-selected")) li.classList.remove("is-selected");
+        }
+    } else {
+        for (const item of playlistItems) playlistSelected.add(String(item.id));
+        if (playlistItemsEl) {
+            for (const li of playlistItemsEl.querySelectorAll("li[data-id]")) li.classList.add("is-selected");
+        }
+    }
+    updatePlaylistMultiToolbar();
+}
+
+async function playlistMultiRemove(){
+    if (!sid || playlistSelected.size === 0) return;
+    const features = window.uiConfig.features || {};
+    const selectedIds = [...playlistSelected];
+
+    if (!(features.removePrompt === false)){
+        const names = selectedIds.map(id => {
+            const item = playlistItems.find(it => String(it.id) === id);
+            return item ? (item.name || item.uri || "(untitled)") : id;
+        });
+        const listText = names.map(n => `• ${n}`).join("\n");
+        if (!confirm(`Remove ${selectedIds.length} item${selectedIds.length !== 1 ? "s" : ""} from playlist?\n\n${listText}`)) return;
+    }
+
+    const failed = [];
+    for (const id of selectedIds){
+        try{
+            await apiGet(`/api/playlist/remove?id=${encodeURIComponent(id)}`);
+            playlistSelected.delete(id);
+        }catch(e){
+            const item = playlistItems.find(it => String(it.id) === id);
+            failed.push(item ? (item.name || item.uri || id) : id);
+        }
+    }
+
+    if (failed.length) showToast(`Failed to remove: ${failed.join(", ")}`, "err");
+    if (playlistWithSelectedEl) playlistWithSelectedEl.value = "";
+    updatePlaylistMultiToolbar();
+}
+
 function renderPlaylist(){
     if(!playlistItemsEl || !playlistEmptyEl) return;
 
@@ -1040,6 +1185,7 @@ function renderPlaylist(){
     const playbackState = String((window.__lastStatus && window.__lastStatus.state) || "").toLowerCase();
 
     updatePlaylistCountChip();
+    updatePlaylistMultiToolbar();
 
     if (!playlistItems.length){
         if (playlistItemsEl.firstChild) playlistItemsEl.innerHTML = "";
@@ -1080,6 +1226,7 @@ function renderPlaylist(){
             updatePlaylistRow(li, item, playbackState, showProgressTime, showResumeAccent);
             if (cursor !== li) playlistItemsEl.insertBefore(li, cursor);
         }
+        if (playlistMultiActive) li.classList.toggle("is-selected", playlistSelected.has(id));
         cursor = li.nextSibling;
     }
 
@@ -1238,7 +1385,7 @@ document.addEventListener("keydown", (e) => {
             e.preventDefault();
             let idx = targeted ? actionBtns.indexOf(ae) : actionBtns.length - 1;
             idx = (e.key === "ArrowRight") ? (idx + 1) % actionBtns.length
-                                           : (idx - 1 + actionBtns.length) % actionBtns.length;
+                : (idx - 1 + actionBtns.length) % actionBtns.length;
             actionBtns[idx].focus();
             return;
         }
@@ -1264,6 +1411,12 @@ document.addEventListener("keydown", (e) => {
             return;
         }
         if (!inSearch && (e.key === " " || e.key === "Spacebar")){
+            if (e.shiftKey && fileBrowserMultiAvailable()){
+                e.preventDefault(); e.stopPropagation();
+                if (fileBrowserMultiActive) exitFileBrowserMulti();
+                else enterFileBrowserMulti();
+                return;
+            }
             const ae = document.activeElement;
             if (ae && ae.tagName === "LI" && fileBrowserItemsEl.contains(ae)){
                 const playBtn = ae.querySelector(".file-browser-btn.play");
@@ -1279,6 +1432,12 @@ document.addEventListener("keydown", (e) => {
     if (isPlaylistOpen()){
         if (trapTab(playlistModal, e)) return;
         if (e.key === "Escape"){ e.preventDefault(); closePlaylist(); return; }
+        if ((e.key === " " || e.key === "Spacebar") && e.shiftKey && playlistMultiAvailable()){
+            e.preventDefault(); e.stopPropagation();
+            if (playlistMultiActive) exitPlaylistMulti();
+            else enterPlaylistMulti();
+            return;
+        }
         if (e.key === " " || e.key === "Spacebar"){
             e.preventDefault(); e.stopPropagation();
             const state = String((window.__lastStatus && window.__lastStatus.state) || "").toLowerCase();
@@ -1314,6 +1473,10 @@ const fileBrowserSearchEl = document.getElementById("fileBrowserSearch");
 const btnFileBrowserClose = document.getElementById("btnFileBrowserClose");
 const btnFileBrowserView = document.getElementById("btnFileBrowserView");
 const btnPlaylistAddFiles = document.getElementById("btnPlaylistAddFiles");
+const fileBrowserMultiselectBarEl = document.getElementById("fileBrowserMultiselectBar");
+const fileBrowserMultiselectCheckEl = document.getElementById("fileBrowserMultiselectCheck");
+const fileBrowserSelectAllEl = document.getElementById("fileBrowserSelectAll");
+const fileBrowserWithSelectedEl = document.getElementById("fileBrowserWithSelected");
 
 const FILE_BROWSER_VIEW_KEY = "vlc_fb_view"; // "grid" | "list"
 function getFileBrowserViewMode(){
@@ -1375,6 +1538,7 @@ function openFileBrowser(){
 function closeFileBrowser(){
     if (!fileBrowserModal) return;
     fileBrowserModal.hidden = true;
+    if (fileBrowserMultiActive) exitFileBrowserMulti();
 }
 function isFileBrowserOpen(){ return fileBrowserModal && !fileBrowserModal.hidden; }
 
@@ -1469,6 +1633,7 @@ async function loadFileBrowserDirectory(rootId, path){
         fileBrowserState.rootLabel = data.root.label;
         fileBrowserState.path = data.path || "";
         fileBrowserState.entries = Array.isArray(data.entries) ? data.entries : [];
+        if (fileBrowserMultiActive) fileBrowserSelected.clear();
         renderFileBrowser();
     }catch(e){
         console.error("dir load failed", e);
@@ -1540,10 +1705,25 @@ function renderFileBrowserBreadcrumbs(){
 function fileBrowserEntryKey(entry){
     if (entry.type === "up") return "up";
     if (entry.type === "root") return `root:${entry.rootId}`;
+    if (entry.type === "group-header") return `group-header:${entry.label}`;
     return `${entry.type}:${entry.name}`;
 }
 
 function buildFileBrowserRow(entry){
+    if (entry.type === "group-header"){
+        const li = document.createElement("li");
+        li.className = "file-browser-group-header";
+        li.dataset.key = fileBrowserEntryKey(entry);
+        li.dataset.type = "group-header";
+        li.setAttribute("aria-hidden", "true");
+        li.addEventListener("click", () => toggleFileBrowserGroup(li));
+        const labelEl = document.createElement("span");
+        labelEl.className = "file-browser-group-label";
+        labelEl.textContent = entry.label;
+        li.appendChild(labelEl);
+        return li;
+    }
+
     const li = document.createElement("li");
     const isDirish = (entry.type === "dir" || entry.type === "root");
     const isUp = (entry.type === "up");
@@ -1553,22 +1733,25 @@ function buildFileBrowserRow(entry){
     li.dataset.key = fileBrowserEntryKey(entry);
     li.dataset.type = entry.type;
 
+    const layout = window.uiConfig.layout || {};
+    const buttonsConfig = window.uiConfig.buttons || {};
+    const showIcons = !(layout.showFileBrowserFileIcons === false);
+    const showSize = !(layout.showFileBrowserFileSize === false);
+    const showIndicator = !(layout.showFileBrowserFileIndicator === false);
+
     const indicatorEl = document.createElement("span");
     indicatorEl.className = "playlist-indicator";
     indicatorEl.textContent = isUp ? "⬆" : (isDirish ? "📁" : "🎬");
+    if (!showIcons) indicatorEl.style.display = "none";
     li.appendChild(indicatorEl);
 
     const name = document.createElement("span");
     name.className = "playlist-name";
     const nameValue = entry.name || "(untitled)";
-    name.textContent = nameValue;
+    const nameDisplay = (!showIcons && entry.type === "dir") ? `/${nameValue}` : nameValue;
+    name.textContent = nameDisplay;
     name.title = nameValue;
     li.appendChild(name);
-
-    const layout = window.uiConfig.layout || {};
-    const buttonsConfig = window.uiConfig.buttons || {};
-    const showSize = !(layout.showFileBrowserFileSize === false);
-    const showIndicator = !(layout.showFileBrowserFileIndicator === false);
     const showAdd = !(buttonsConfig.addFile === false);
     const showPlay = !(buttonsConfig.playFile === false);
 
@@ -1597,6 +1780,18 @@ function buildFileBrowserRow(entry){
             else loadFileBrowserDirectory(fileBrowserState.rootId, fileBrowserChildPath(name));
         });
     } else {
+        li.addEventListener("click", (e) => {
+            if (e.shiftKey && fileBrowserMultiAvailable()){
+                e.stopPropagation();
+                enterFileBrowserMulti();
+                toggleFileBrowserItem(li.dataset.key);
+                return;
+            }
+            if (fileBrowserMultiActive){
+                toggleFileBrowserItem(li.dataset.key);
+            }
+        });
+
         const actions = document.createElement("span");
         actions.className = "file-browser-actions";
 
@@ -1628,13 +1823,16 @@ function buildFileBrowserRow(entry){
 }
 
 function updateFileBrowserRow(li, entry){
+    if (entry.type === "group-header") return;
     li.dataset.entryName = entry.name || "";
     if (entry.type === "root" && entry.rootId) li.dataset.rootId = entry.rootId;
 
     const name = li.querySelector(".playlist-name");
     const nameValue = entry.name || "(untitled)";
     if (name){
-        if (name.textContent !== nameValue) name.textContent = nameValue;
+        const showIcons = !((window.uiConfig.layout || {}).showFileBrowserFileIcons === false);
+        const nameDisplay = (!showIcons && entry.type === "dir") ? `/${nameValue}` : nameValue;
+        if (name.textContent !== nameDisplay) name.textContent = nameDisplay;
         if (name.title !== nameValue) name.title = nameValue;
     }
 
@@ -1665,9 +1863,220 @@ function updateFileBrowserRow(li, entry){
     }
 }
 
+function fileBrowserMultiAvailable(){
+    if (window.uiConfig.features?.fileBrowserSelectMulti === false) return false;
+    const features = window.uiConfig.features || {};
+    const buttons = window.uiConfig.buttons || {};
+    const canAdd = !(buttons.addFile === false);
+    const canRemove = !(features.playlistControl === false) && !(buttons.removeTrack === false);
+    return canAdd || canRemove;
+}
+
+function updateFileBrowserMultiToolbar(){
+    if (!fileBrowserMultiselectBarEl) return;
+    const layout = window.uiConfig.layout || {};
+    const available = fileBrowserMultiAvailable();
+    const showCheckbox = available && !(layout.showFileBrowserSelectMulti === false);
+    const hasContent = fileBrowserState.entries.some(e => e.type === "file");
+    const showBar = (showCheckbox && hasContent) || fileBrowserMultiActive;
+    fileBrowserMultiselectBarEl.hidden = !showBar;
+    fileBrowserMultiselectBarEl.classList.toggle("is-overlay", fileBrowserMultiActive && !showCheckbox);
+
+    if (fileBrowserMultiselectCheckEl) {
+        const labelEl = fileBrowserMultiselectCheckEl.closest("label");
+        if (labelEl) labelEl.style.display = showCheckbox ? "" : "none";
+    }
+    const showControls = fileBrowserMultiActive;
+    if (fileBrowserSelectAllEl) {
+        fileBrowserSelectAllEl.style.display = showControls ? "" : "none";
+        const fileItems = fileBrowserItemsEl ? Array.from(fileBrowserItemsEl.querySelectorAll("li[data-type='file']")) : [];
+        const allSelected = fileItems.length > 0 && fileItems.every(li => fileBrowserSelected.has(li.dataset.key));
+        fileBrowserSelectAllEl.textContent = allSelected ? "Deselect all" : "Select all";
+    }
+    if (fileBrowserWithSelectedEl) {
+        fileBrowserWithSelectedEl.style.display = showControls ? "" : "none";
+        fileBrowserWithSelectedEl.disabled = fileBrowserSelected.size === 0;
+    }
+}
+
+function updateFileBrowserGroupHeaders(){
+    if (!fileBrowserItemsEl) return;
+    const headers = fileBrowserItemsEl.querySelectorAll("li[data-type='group-header']");
+    for (const header of headers){
+        const items = [];
+        let sib = header.nextSibling;
+        while (sib && sib.dataset.type !== "group-header"){
+            if (sib.dataset && sib.dataset.type === "file") items.push(sib);
+            sib = sib.nextSibling;
+        }
+        const keys = items.map(el => el.dataset.key);
+        const allSelected = keys.length > 0 && keys.every(k => fileBrowserSelected.has(k));
+        const anySelected = keys.some(k => fileBrowserSelected.has(k));
+        header.classList.toggle("group-all-selected", allSelected);
+        header.classList.toggle("group-partial", anySelected && !allSelected);
+    }
+}
+
+function enterFileBrowserMulti(){
+    if (!fileBrowserMultiAvailable()) return;
+    fileBrowserMultiActive = true;
+    fileBrowserSelected.clear();
+    if (fileBrowserMultiselectCheckEl) fileBrowserMultiselectCheckEl.checked = true;
+    if (fileBrowserItemsEl) fileBrowserItemsEl.classList.add("multiselect-active");
+    updateFileBrowserMultiToolbar();
+}
+
+function exitFileBrowserMulti(){
+    fileBrowserMultiActive = false;
+    fileBrowserSelected.clear();
+    if (fileBrowserMultiselectCheckEl) fileBrowserMultiselectCheckEl.checked = false;
+    if (fileBrowserItemsEl) fileBrowserItemsEl.classList.remove("multiselect-active");
+    if (fileBrowserItemsEl) {
+        for (const li of fileBrowserItemsEl.querySelectorAll(".is-selected")) li.classList.remove("is-selected");
+        for (const li of fileBrowserItemsEl.querySelectorAll(".group-all-selected,.group-partial")){
+            li.classList.remove("group-all-selected", "group-partial");
+        }
+    }
+    updateFileBrowserMultiToolbar();
+}
+
+function toggleFileBrowserItem(key){
+    if (fileBrowserSelected.has(key)) fileBrowserSelected.delete(key);
+    else fileBrowserSelected.add(key);
+    if (fileBrowserItemsEl) {
+        const li = fileBrowserItemsEl.querySelector(`li[data-key="${CSS.escape(key)}"]`);
+        if (li) li.classList.toggle("is-selected", fileBrowserSelected.has(key));
+    }
+    updateFileBrowserMultiToolbar();
+    updateFileBrowserGroupHeaders();
+}
+
+function toggleFileBrowserGroup(headerLi){
+    if (!fileBrowserMultiActive || !fileBrowserItemsEl) return;
+    const items = [];
+    let sib = headerLi.nextSibling;
+    while (sib && (!sib.dataset || sib.dataset.type !== "group-header")){
+        if (sib.dataset && sib.dataset.type === "file") items.push(sib);
+        sib = sib.nextSibling;
+    }
+    const keys = items.map(el => el.dataset.key);
+    const allSelected = keys.length > 0 && keys.every(k => fileBrowserSelected.has(k));
+    if (allSelected){
+        keys.forEach(k => fileBrowserSelected.delete(k));
+    } else {
+        keys.forEach(k => fileBrowserSelected.add(k));
+    }
+    items.forEach(el => el.classList.toggle("is-selected", fileBrowserSelected.has(el.dataset.key)));
+    updateFileBrowserMultiToolbar();
+    updateFileBrowserGroupHeaders();
+}
+
+function selectAllFileBrowserItems(){
+    if (!fileBrowserItemsEl) return;
+    const fileItems = Array.from(fileBrowserItemsEl.querySelectorAll("li[data-type='file']"));
+    const allSelected = fileItems.length > 0 && fileItems.every(li => fileBrowserSelected.has(li.dataset.key));
+    if (allSelected){
+        fileItems.forEach(li => { fileBrowserSelected.delete(li.dataset.key); li.classList.remove("is-selected"); });
+    } else {
+        fileItems.forEach(li => { fileBrowserSelected.add(li.dataset.key); li.classList.add("is-selected"); });
+    }
+    updateFileBrowserMultiToolbar();
+    updateFileBrowserGroupHeaders();
+}
+
+async function fileBrowserMultiAdd(){
+    if (!sid || !fileBrowserState.rootId || fileBrowserSelected.size === 0) return;
+    const fileItems = fileBrowserItemsEl
+        ? Array.from(fileBrowserItemsEl.querySelectorAll("li[data-type='file']")).filter(li => fileBrowserSelected.has(li.dataset.key))
+        : [];
+    if (!fileItems.length) return;
+
+    const failed = [];
+    for (const li of fileItems){
+        const name = li.dataset.entryName;
+        try{
+            const rel = fileBrowserChildPath(name);
+            await apiGet(`/api/files/add?root=${encodeURIComponent(fileBrowserState.rootId)}&path=${encodeURIComponent(rel)}`);
+            fileBrowserSelected.delete(li.dataset.key);
+            li.classList.remove("is-selected");
+        }catch(e){
+            failed.push(name);
+        }
+    }
+
+    const added = fileItems.length - failed.length;
+    if (added > 0) showToast(`Added ${added} file${added !== 1 ? "s" : ""}`, "ok");
+    if (failed.length) showToast(`Failed to add: ${failed.join(", ")}`, "err");
+    if (fileBrowserWithSelectedEl) fileBrowserWithSelectedEl.value = "";
+    updateFileBrowserMultiToolbar();
+    updateFileBrowserGroupHeaders();
+}
+
+async function fileBrowserMultiRemove(){
+    if (!sid || fileBrowserSelected.size === 0) return;
+    const features = window.uiConfig.features || {};
+
+    const fileItems = fileBrowserItemsEl
+        ? Array.from(fileBrowserItemsEl.querySelectorAll("li[data-type='file']")).filter(li => fileBrowserSelected.has(li.dataset.key))
+        : [];
+
+    const toRemove = [];
+    for (const li of fileItems){
+        const name = li.dataset.entryName;
+        const rel = fileBrowserState.path ? `${fileBrowserState.path}/${name}` : name;
+        const matching = playlistItems.filter(it => {
+            const uri = it.uri || "";
+            return uri === rel || uri.endsWith(`/${rel}`) || uri.endsWith(`/${name}`);
+        });
+        for (const item of matching) {
+            toRemove.push({
+                id: String(item.id),
+                name: item.name || item.uri || name,
+                key: li.dataset.key
+            });
+        }
+    }
+
+    if (!toRemove.length){
+        showToast("None of the selected files are in the playlist", "info");
+        if (fileBrowserWithSelectedEl) fileBrowserWithSelectedEl.value = "";
+        return;
+    }
+
+    if (!(features.removePrompt === false)){
+        const listText = toRemove.map(it => `• ${it.name}`).join("\n");
+        if (!confirm(`Remove ${toRemove.length} item${toRemove.length !== 1 ? "s" : ""} from playlist?\n\n${listText}`)) return;
+    }
+
+    const failed = [];
+    const successKeys = new Set();
+    for (const item of toRemove){
+        try{
+            await apiGet(`/api/playlist/remove?id=${encodeURIComponent(item.id)}`);
+            successKeys.add(item.key);
+        }catch(e){
+            failed.push(item.name);
+        }
+    }
+
+    for (const key of successKeys){
+        fileBrowserSelected.delete(key);
+        if (fileBrowserItemsEl){
+            const li = fileBrowserItemsEl.querySelector(`li[data-key="${CSS.escape(key)}"]`);
+            if (li) li.classList.remove("is-selected");
+        }
+    }
+
+    if (failed.length) showToast(`Failed to remove: ${failed.join(", ")}`, "err");
+    if (fileBrowserWithSelectedEl) fileBrowserWithSelectedEl.value = "";
+    updateFileBrowserMultiToolbar();
+    updateFileBrowserGroupHeaders();
+}
+
 function renderFileBrowser(){
     if (!fileBrowserItemsEl || !fileBrowserEmptyEl) return;
     renderFileBrowserBreadcrumbs();
+    updateFileBrowserMultiToolbar();
 
     const filter = (fileBrowserSearchEl && fileBrowserSearchEl.value || "").trim().toLowerCase();
     const base = fileBrowserState.entries.filter(entry => !filter || entry.name.toLowerCase().includes(filter));
@@ -1675,7 +2084,40 @@ function renderFileBrowser(){
     const inSubdir = !!fileBrowserState.rootId && !!fileBrowserState.path;
     const atRootTop = !!fileBrowserState.rootId && !fileBrowserState.path;
     const showUp = inSubdir || (atRootTop && multiRoot);
-    const entries = showUp ? [{ name: "Up one level", type: "up" }, ...base] : base;
+    const layout = window.uiConfig.layout || {};
+    const grouped = !(layout.showFileBrowserFilesGrouped === false);
+    const sorted = grouped ? (() => {
+        const extOf = n => { const i = (n || "").lastIndexOf("."); return i > 0 ? n.slice(i + 1).toLowerCase() : ""; };
+        const dirs = base.filter(e => e.type !== "file");
+        const files = base.filter(e => e.type === "file");
+        files.sort((a, b) => {
+            const extA = extOf(a.name), extB = extOf(b.name);
+            if (extA !== extB){
+                if (!extA) return 1;
+                if (!extB) return -1;
+                return extA.localeCompare(extB);
+            }
+            return (a.name || "").localeCompare(b.name || "");
+        });
+        const result = [];
+        if (dirs.length){
+            result.push({ type: "group-header", label: "Folders" });
+            result.push(...dirs);
+        }
+        const byExt = new Map();
+        for (const f of files){
+            const ext = extOf(f.name);
+            if (!byExt.has(ext)) byExt.set(ext, []);
+            byExt.get(ext).push(f);
+        }
+        const exts = [...byExt.keys()].sort((a, b) => (!a ? 1 : !b ? -1 : a.localeCompare(b)));
+        for (const ext of exts){
+            result.push({ type: "group-header", label: ext ? ext.toUpperCase() : "Other" });
+            result.push(...byExt.get(ext));
+        }
+        return result;
+    })() : base;
+    const entries = showUp ? [{ name: "Up one level", type: "up" }, ...sorted] : sorted;
 
     if (!entries.length){
         if (fileBrowserItemsEl.firstChild) fileBrowserItemsEl.innerHTML = "";
@@ -1709,12 +2151,15 @@ function renderFileBrowser(){
             updateFileBrowserRow(li, entry);
             if (cursor !== li) fileBrowserItemsEl.insertBefore(li, cursor);
         }
+        if (fileBrowserMultiActive && entry.type === "file") li.classList.toggle("is-selected", fileBrowserSelected.has(key));
         cursor = li.nextSibling;
     }
 
     for (const [key, li] of existing){
         if (!seen.has(key)) li.remove();
     }
+
+    if (fileBrowserMultiActive) updateFileBrowserGroupHeaders();
 }
 
 async function filesAdd(name){
@@ -1794,6 +2239,37 @@ if (fileBrowserModal){
     });
 }
 if (fileBrowserSearchEl) fileBrowserSearchEl.addEventListener("input", () => renderFileBrowser());
+
+if (playlistMultiselectCheckEl){
+    playlistMultiselectCheckEl.addEventListener("change", () => {
+        if (playlistMultiselectCheckEl.checked) enterPlaylistMulti();
+        else exitPlaylistMulti();
+    });
+}
+if (playlistSelectAllEl) playlistSelectAllEl.addEventListener("click", selectAllPlaylistItems);
+if (playlistWithSelectedEl){
+    playlistWithSelectedEl.addEventListener("change", () => {
+        const action = playlistWithSelectedEl.value;
+        if (!action) return;
+        if (action === "remove") playlistMultiRemove();
+    });
+}
+
+if (fileBrowserMultiselectCheckEl){
+    fileBrowserMultiselectCheckEl.addEventListener("change", () => {
+        if (fileBrowserMultiselectCheckEl.checked) enterFileBrowserMulti();
+        else exitFileBrowserMulti();
+    });
+}
+if (fileBrowserSelectAllEl) fileBrowserSelectAllEl.addEventListener("click", selectAllFileBrowserItems);
+if (fileBrowserWithSelectedEl){
+    fileBrowserWithSelectedEl.addEventListener("change", () => {
+        const action = fileBrowserWithSelectedEl.value;
+        if (!action) return;
+        if (action === "add") fileBrowserMultiAdd();
+        else if (action === "remove") fileBrowserMultiRemove();
+    });
+}
 
 async function fetchClients(){
     try{

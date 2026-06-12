@@ -75,8 +75,18 @@
       <h2 id="playlistModalTitle">Playlist</h2>
       <button class="icon-btn" id="btnPlaylistClose" aria-label="Close">✕</button>
     </div>
-    <ul class="playlist-list" id="playlistItems"></ul>
-    <div class="playlist-empty" id="playlistEmpty">Playlist is empty.</div>
+    <div class="modal-body" id="playlistModalBody">
+      <div class="multiselect-toolbar" id="playlistMultiselectBar" hidden>
+        <label class="multiselect-toggle"><input type="checkbox" id="playlistMultiselectCheck"> Multiselect</label>
+        <button type="button" class="multiselect-select-all" id="playlistSelectAll">Select all</button>
+        <select class="multiselect-with-selected" id="playlistWithSelected" disabled>
+          <option value="">With selected…</option>
+          <option value="remove">Remove from playlist</option>
+        </select>
+      </div>
+      <ul class="playlist-list" id="playlistItems"></ul>
+      <div class="playlist-empty" id="playlistEmpty">Playlist is empty.</div>
+    </div>
     <div id="playlistModalFooter" class="modal-footer">
       <button id="btnPlaylistAddFiles">➕ <span>Add files</span></button>
       <button class="danger" id="btnPlaylistClear">Clear playlist</button>
@@ -95,8 +105,19 @@
       <input type="search" class="file-browser-search" id="fileBrowserSearch" placeholder="Filter…" autocomplete="off" />
       <button class="icon-btn file-browser-view-toggle" id="btnFileBrowserView" type="button" aria-label="Toggle grid / list view" title="Toggle grid / list view">▦</button>
     </div>
-    <ul class="playlist-list file-browser-list" id="fileBrowserItems"></ul>
-    <div class="playlist-empty" id="fileBrowserEmpty">Nothing here.</div>
+    <div class="modal-body" id="fileBrowserModalBody">
+      <div class="multiselect-toolbar" id="fileBrowserMultiselectBar" hidden>
+        <label class="multiselect-toggle"><input type="checkbox" id="fileBrowserMultiselectCheck"> Multiselect</label>
+        <button type="button" class="multiselect-select-all" id="fileBrowserSelectAll">Select all</button>
+        <select class="multiselect-with-selected" id="fileBrowserWithSelected" disabled>
+          <option value="">With selected…</option>
+          <option value="add">Add to playlist</option>
+          <option value="remove">Remove from playlist</option>
+        </select>
+      </div>
+      <ul class="playlist-list file-browser-list" id="fileBrowserItems"></ul>
+      <div class="playlist-empty" id="fileBrowserEmpty">Nothing here.</div>
+    </div>
   </div>
 </div>
 
