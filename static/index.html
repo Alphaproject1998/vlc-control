@@ -28,17 +28,18 @@
     </header>
 
     <div class="content">
-      <div class="now">
+      <div id="nowPlaying">
         <div class="label">Now playing</div>
         <div class="title" id="title">Waiting for a slot…</div>
 
-        <div class="progress-wrap" id="pwrap">
-          <div class="preview" id="preview">Seek to 0:00</div>
-          <input id="progress" type="range" min="0" max="1000" value="0" />
-          <div class="meta">
+        <div class="seek-bar-wrap" id="seekBarWrap">
+          <div class="seek-preview" id="seekPreview">Seek to 0:00</div>
+          <input id="seekBar" type="range" min="0" max="1000" value="0" />
+          <div id="nowPlayingMeta">
             <div class="chips">
               <span class="chip" id="state">state: locked</span>
               <span class="chip" id="clock" title="Click to toggle remaining time" style="cursor:pointer;">0:00 / 0:00</span>
+              <span class="chip" id="playlistCountChip" title="0 in playlist" style="cursor:pointer;" hidden>0</span>
             </div>
             <div class="chips">
               <span class="chip" id="clients">clients: ?/?</span>
@@ -55,17 +56,87 @@
         <button id="btnNext">⏭️ <span>Next</span></button>
         <button id="btnBack">⟲ <span>-10s</span></button>
         <button id="btnFwd">⟳ <span>+10s</span></button>
+        <button id="btnPlaylist" style="grid-column: 1 / -1;">📜 <span>Playlist</span></button>
       </div>
 
       <div class="status">
-        <span id="out">Waiting…</span>
-        <span class="pill" id="pill">WAIT</span>
+        <span id="statusText">Waiting…</span>
+        <span class="status-pill" id="statusPill">WAIT</span>
       </div>
 
       <div class="foot" id="footerText">Tip: keep the link private.</div>
     </div>
   </main>
 </div>
+
+<div class="modal-overlay" id="playlistModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="playlistModalTitle">
+    <div class="modal-header">
+      <h2 id="playlistModalTitle">Playlist</h2>
+      <button class="icon-btn" id="btnPlaylistClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="playlistModalBody">
+      <div class="multiselect-toolbar" id="playlistMultiselectBar" hidden>
+        <label class="multiselect-toggle"><input type="checkbox" id="playlistMultiselectCheck"> Multiselect</label>
+        <button type="button" class="multiselect-select-all" id="playlistSelectAll">Select all</button>
+        <select class="multiselect-with-selected" id="playlistWithSelected" disabled>
+          <option value="">With selected…</option>
+          <option value="remove">Remove from playlist</option>
+        </select>
+      </div>
+      <ul class="playlist-list" id="playlistItems"></ul>
+      <div class="playlist-empty" id="playlistEmpty">Playlist is empty.</div>
+    </div>
+    <div id="playlistModalFooter" class="modal-footer">
+      <button id="btnPlaylistAddFiles">➕ <span>Add files</span></button>
+      <button class="danger" id="btnPlaylistClear">Clear playlist</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="fileBrowserModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="fileBrowserTitle">
+    <div class="modal-header">
+      <h2 id="fileBrowserTitle">Add files</h2>
+      <button class="icon-btn" id="btnFileBrowserClose" aria-label="Close">✕</button>
+    </div>
+    <div class="file-browser-toolbar">
+      <div class="file-browser-crumbs" id="fileBrowserCrumbs"></div>
+      <input type="search" class="file-browser-search" id="fileBrowserSearch" placeholder="Filter…" autocomplete="off" />
+      <button class="icon-btn file-browser-view-toggle" id="btnFileBrowserView" type="button" aria-label="Toggle grid / list view" title="Toggle grid / list view">▦</button>
+    </div>
+    <div class="modal-body" id="fileBrowserModalBody">
+      <div class="multiselect-toolbar" id="fileBrowserMultiselectBar" hidden>
+        <label class="multiselect-toggle"><input type="checkbox" id="fileBrowserMultiselectCheck"> Multiselect</label>
+        <button type="button" class="multiselect-select-all" id="fileBrowserSelectAll">Select all</button>
+        <select class="multiselect-with-selected" id="fileBrowserWithSelected" disabled>
+          <option value="">With selected…</option>
+          <option value="add">Add to playlist</option>
+          <option value="remove">Remove from playlist</option>
+        </select>
+      </div>
+      <ul class="playlist-list file-browser-list" id="fileBrowserItems"></ul>
+      <div class="playlist-empty" id="fileBrowserEmpty">Nothing here.</div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="resumeModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="resumeModalTitle">
+    <div class="modal-header">
+      <h2 id="resumeModalTitle">Resume playback?</h2>
+      <button class="icon-btn" id="btnResumeClose" aria-label="Close">✕</button>
+    </div>
+    <div id="resumeBody" class="resume-body"></div>
+    <div class="modal-footer">
+      <button id="btnResumeCancel">Cancel</button>
+      <button id="btnResumeRestart">Start over</button>
+      <button class="primary" id="btnResumeContinue">Resume</button>
+    </div>
+  </div>
+</div>
+
+<div id="toastHost" class="toast-host" aria-live="polite"></div>
 
 <script src="app.js" defer></script>
 </body>

@@ -13,7 +13,7 @@ PREFIX="${VLC_CONTROL_PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/vlc-control}"
 
 show_help() {
   cat <<'H'
-vlc-control [run] [--seats N|-s N]
+vlc-control [--seats N|-s N]
 
 Runs the local bridge + (optional) Cloudflare quick tunnel.
 
@@ -71,9 +71,15 @@ SEATS_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -s|--seats)
-      shift
-      SEATS_OVERRIDE="${1:-}"
-      shift || true
+      #shift
+      #SEATS_OVERRIDE="${1:-}"
+      #shift || true
+      if ! [[ "$2" =~ ^[0-9]+$ ]] || (( $2 < 1 || $2 > 99 )); then
+      echo "[!] --seats requires a numeric value (1..99)" >&2
+      exit 2
+      fi
+      SEATS_OVERRIDE="$2"
+      shift 2
       ;;
     -h|--help)
       show_help
@@ -113,6 +119,7 @@ load_env_file "$CFG_ENV" || {
 : "${VLC_PASS:=}"
 : "${VLC_MODE:=auto}"
 : "${START_VLC:=yes}"
+: "${KILL_VLC_ON_EXIT:=yes}"
 : "${CLOUDFLARE:=auto}"
 : "${LOG_DIR:=/tmp}"
 mkdir -p "${LOG_DIR}"
@@ -205,20 +212,26 @@ start_vlc_if_needed() {
   fi
 
   echo "[*] Starting VLC (${resolved_vlc_mode}) with HTTP control..."
+  local vlc_cmd=()
   if [[ "$resolved_vlc_mode" == "flatpak" ]]; then
-    flatpak run org.videolan.VLC \
-      --extraintf http \
-      --http-host "${VLC_HOST}" \
-      --http-port "${VLC_PORT}" \
-      --http-password "${VLC_PASS}" \
-      >"${LOG_DIR}/vlc-http.log" 2>&1 &
+    vlc_cmd=(flatpak run org.videolan.VLC)
   else
-    vlc \
-      --extraintf http \
-      --http-host "${VLC_HOST}" \
-      --http-port "${VLC_PORT}" \
-      --http-password "${VLC_PASS}" \
-      >"${LOG_DIR}/vlc-http.log" 2>&1 &
+    vlc_cmd=(vlc)
+  fi
+  vlc_cmd+=(--extraintf http --http-host "${VLC_HOST}" --http-port "${VLC_PORT}" --http-password "${VLC_PASS}")
+
+  if [[ "${KILL_VLC_ON_EXIT}" == "yes" ]]; then
+    "${vlc_cmd[@]}" >"${LOG_DIR}/vlc-http.log" 2>&1 &
+    VLC_PID=$!
+    echo "[*] VLC PID: ${VLC_PID} (will be stopped when runner exits)"
+  else
+    if command -v setsid >/dev/null 2>&1; then
+      setsid "${vlc_cmd[@]}" >"${LOG_DIR}/vlc-http.log" 2>&1 < /dev/null &
+    else
+      "${vlc_cmd[@]}" >"${LOG_DIR}/vlc-http.log" 2>&1 < /dev/null &
+      disown || true
+    fi
+    echo "[*] VLC detached (KILL_VLC_ON_EXIT=no) - will survive runner shutdown."
   fi
 
   for _ in {1..30}; do
@@ -418,6 +431,10 @@ cleanup() {
   echo "[*] Stopping..."
   [[ -n "${CF_PID:-}" ]] && kill "$CF_PID" 2>/dev/null || true
   [[ -n "${BRIDGE_PID:-}" ]] && kill "$BRIDGE_PID" 2>/dev/null || true
+  if [[ -n "${VLC_PID:-}" ]]; then
+    echo "[*] Stopping VLC (PID ${VLC_PID})..."
+    kill "$VLC_PID" 2>/dev/null || true
+  fi
   stop_hostlog
 }
 trap cleanup INT TERM EXIT
