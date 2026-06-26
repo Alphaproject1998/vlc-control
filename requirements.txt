@@ -1,3 +1,4 @@
 flask
 requests
 flask-sock
+tomli; python_version < "3.11"

@@ -640,6 +640,7 @@ button.playlist-indicator:hover {
     width: 32px;
     height: 32px;
     font-size: 15px;
+    padding-bottom: 4px;
 }
 
 .file-browser-list.grid {

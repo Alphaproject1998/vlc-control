@@ -10,37 +10,69 @@ import requests
 import secrets
 from urllib.parse import quote, unquote, urlparse
 
-VLC_URL = os.environ.get("VLC_URL", "http://127.0.0.1:8080")
-VLC_PASS = os.environ.get("VLC_PASS", "")
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ImportError:
+        tomllib = None  # type: ignore[assignment]
+
+
+def _load_config() -> dict:
+    config_dir = os.environ.get("VLC_CONTROL_CONFIG_DIR", "")
+    candidates = []
+    if config_dir:
+        candidates.append(os.path.join(config_dir, "config.toml"))
+    candidates.append(os.path.join(os.path.dirname(__file__), "..", "config", "config.toml"))
+    for path in candidates:
+        if os.path.isfile(path):
+            if tomllib is None:
+                print(f"WARNING: tomllib unavailable, cannot parse {path}. Using defaults.", flush=True)
+                return {}
+            with open(path, "rb") as f:
+                return tomllib.load(f)
+    print("WARNING: config.toml not found. Using defaults.", flush=True)
+    return {}
+
+
+_CFG = _load_config()
+_SYS = _CFG.get("system", {})
+_FB = _CFG.get("file_browse", {})
+_FEAT = _CFG.get("features", {})
+
 TOKEN = os.environ.get("TOKEN", "")
 
-MAX_CLIENTS = int(os.environ.get("MAX_CLIENTS", "2"))
-GRACE_SECONDS = float(os.environ.get("GRACE_SECONDS", "30"))
+_vlc_host = str(_SYS.get("vlc_host", "127.0.0.1"))
+_vlc_port = int(_SYS.get("vlc_port", 8080))
+VLC_URL = f"http://{_vlc_host}:{_vlc_port}"
+VLC_PASS = str(_SYS.get("vlc_pass", os.environ.get("VLC_PASS", "")))
 
+MAX_CLIENTS = int(os.environ.get("MAX_CLIENTS") or _SYS.get("max_clients", 2))
+GRACE_SECONDS = float(os.environ.get("GRACE_SECONDS") or _SYS.get("grace_seconds", 30))
 
-def _env_flag(name: str, default: str) -> bool:
-    return (os.environ.get(name, default) or default).strip().lower() in ("on", "yes", "true", "1")
+ALLOW_SEEKING: bool = bool(_FEAT.get("allow_seeking", True))
+ALLOW_PLAYLIST_CONTROL: bool = bool(_FEAT.get("playlist_control", True))
 
+FILE_BROWSE: bool = bool(_FB.get("enabled", False))
+FILE_BROWSE_AUTO: bool = bool(_FB.get("auto", True))
+FILE_BROWSE_AUTO_RECURSIVE: bool = bool(_FB.get("auto_recursive", False))
+FILE_BROWSE_LOG_ROOT_RELATIVE: bool = bool(_FB.get("log_root_relative", True))
 
-FILE_BROWSE = _env_flag("FILE_BROWSE", "off")
-FILE_BROWSE_AUTO = _env_flag("FILE_BROWSE_AUTO", "yes")
-FILE_BROWSE_AUTO_RECURSIVE = _env_flag("FILE_BROWSE_AUTO_RECURSIVE", "no")
-FILE_BROWSE_LOG_ROOT_RELATIVE = _env_flag("FILE_BROWSE_LOG_ROOT_RELATIVE", "yes")
-
-_DEFAULT_EXTS = "mp4,mkv,avi,mov,webm,mp3,flac,ogg,m4a,opus,wav"
+_DEFAULT_EXTS = ["mp4", "mkv", "avi", "mov", "webm", "mp3", "flac", "ogg", "m4a", "opus", "wav"]
 FILE_BROWSE_EXTENSIONS: set[str] = {
-    e.strip().lower().lstrip(".")
-    for e in (os.environ.get("FILE_BROWSE_EXTENSIONS") or _DEFAULT_EXTS).split(",")
-    if e.strip()
+    str(e).strip().lower().lstrip(".")
+    for e in (_FB.get("extensions") or _DEFAULT_EXTS)
+    if str(e).strip()
 }
 
 
 def _parse_file_roots() -> list[tuple[str, str, bool]]:
-    raw = os.environ.get("FILE_BROWSE_DIRS", "") or ""
+    dirs = _FB.get("dirs") or []
     out: list[tuple[str, str, bool]] = []
     seen: set[str] = set()
-    for entry in raw.split(":"):
-        entry = entry.strip()
+    for entry in dirs:
+        entry = str(entry).strip()
         if not entry:
             continue
         recursive = False
@@ -60,10 +92,10 @@ _FILE_ROOTS: list[tuple[str, str, bool]] = _parse_file_roots()
 
 
 def _parse_blacklist_dirs() -> list[list[str]]:
-    raw = os.environ.get("FILE_BROWSE_BLACKLIST_DIRS", "") or ""
+    entries = _FB.get("blacklist_dirs") or []
     out: list[list[str]] = []
-    for entry in raw.split(":"):
-        entry = entry.strip().strip("/").lower()
+    for entry in entries:
+        entry = str(entry).strip().strip("/").lower()
         if not entry:
             continue
         parts = [s for s in entry.split("/") if s]
@@ -73,8 +105,8 @@ def _parse_blacklist_dirs() -> list[list[str]]:
 
 
 def _parse_blacklist_terms() -> list[str]:
-    raw = os.environ.get("FILE_BROWSE_BLACKLIST_TERMS", "") or ""
-    return [t.strip().lower() for t in raw.split(",") if t.strip()]
+    terms = _FB.get("blacklist_terms") or []
+    return [str(t).strip().lower() for t in terms if str(t).strip()]
 
 
 _FILE_BLACKLIST_DIR_PATTERNS: list[list[str]] = _parse_blacklist_dirs()
@@ -100,6 +132,46 @@ def _is_blacklisted_dir_path(rel_parts: list[str]) -> bool:
             if rel_parts[i:i + n] == pat:
                 return True
     return False
+
+def require_allow_seeking() -> None:
+    if not ALLOW_SEEKING:
+        abort(403)
+
+
+def require_playlist_control() -> None:
+    if not ALLOW_PLAYLIST_CONTROL:
+        abort(403)
+
+
+def _snake_to_camel(s: str) -> str:
+    parts = s.split("_")
+    return parts[0] + "".join(p.capitalize() for p in parts[1:])
+
+
+def _camelize(obj):
+    if isinstance(obj, dict):
+        return {_snake_to_camel(k): _camelize(v) for k, v in obj.items()}
+    return obj
+
+
+def _build_frontend_config(cfg: dict) -> dict:
+    ui = cfg.get("ui", {})
+    features = dict(cfg.get("features", {}))
+    features["file_browser"] = _FB.get("enabled", False)
+    raw = {
+        "title": ui.get("title", "VLC Control"),
+        "subtitle": ui.get("subtitle", ""),
+        "footer_text": ui.get("footer_text", ""),
+        "features": features,
+        "layout": cfg.get("layout", {}),
+        "buttons": cfg.get("buttons", {}),
+        "config": cfg.get("config", {}),
+        "theme": cfg.get("theme", {}),
+    }
+    return _camelize(raw)
+
+
+_FRONTEND_CONFIG: dict = _build_frontend_config(_CFG)
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 sock = Sock(app)
@@ -194,17 +266,8 @@ def _can_admit_locked(cid: str, now: float) -> tuple[bool, str]:
     return False, "server full"
 
 
-def _ensure_cid() -> str:
-    cid = request.args.get("cid", "").strip()
-    if not cid:
-        abort(400, "Missing cid")
-    if len(cid) > 200:
-        abort(400, "cid too long")
-    return cid
-
-
 def require_sid() -> tuple[str, str]:
-    sid = request.args.get("sid", "")
+    sid = request.headers.get("X-Session-Id", "")
     if not sid:
         abort(403)
 
@@ -512,7 +575,7 @@ def index():
     return send_from_directory("static", "index.html")
 
 
-@app.get("/api/toggle")
+@app.post("/api/toggle")
 def toggle():
     require_token()
     _, cid = require_sid()
@@ -538,7 +601,7 @@ def toggle():
     return "ok"
 
 
-@app.get("/api/stop")
+@app.post("/api/stop")
 def stop():
     require_token()
     _, cid = require_sid()
@@ -547,7 +610,7 @@ def stop():
     return vlc_cmd("pl_stop")
 
 
-@app.get("/api/next")
+@app.post("/api/next")
 def next_track():
     require_token()
     _, cid = require_sid()
@@ -556,7 +619,7 @@ def next_track():
     return vlc_cmd("pl_next")
 
 
-@app.get("/api/prev")
+@app.post("/api/prev")
 def prev_track():
     require_token()
     _, cid = require_sid()
@@ -566,12 +629,14 @@ def prev_track():
 
 
 # Accepts seconds (123), relative offset (+30, -10), or percent (50%).
-@app.get("/api/seek")
+@app.post("/api/seek")
 def seek():
     require_token()
     _, cid = require_sid()
 
-    val = request.args.get("val", "").strip()
+    require_allow_seeking()
+
+    val = (request.json or {}).get("val", "").strip()
     if not val:
         abort(400, "Missing val")
 
@@ -607,10 +672,15 @@ def seek():
     return "ok"
 
 
+@app.get("/api/config")
+def api_config():
+    require_token()
+    return jsonify(_FRONTEND_CONFIG)
+
+
 @app.get("/api/status")
 def status():
     require_token()
-    #return jsonify(read_status_dict()) if request.args.get("sid") else abort(403)
     require_sid()
     return jsonify(read_status_dict())
 
@@ -629,21 +699,22 @@ def playlist():
     return jsonify(_apply_progress(read_playlist()))
 
 
-@app.get("/api/playlist/play")
+@app.post("/api/playlist/play")
 def playlist_play():
     require_token()
     _, cid = require_sid()
+    require_playlist_control()
 
-    playlist_id = request.args.get("id", "").strip()
+    body = request.json or {}
+    playlist_id = str(body.get("id", "")).strip()
     if not playlist_id:
         abort(400, "Missing id")
 
-    resume_at_raw = request.args.get("resume_at", "").strip()
     resume_at = 0
-    if resume_at_raw:
+    if body.get("resume_at") not in (None, "", 0):
         try:
-            resume_at = max(0, int(resume_at_raw))
-        except ValueError:
+            resume_at = max(0, int(body["resume_at"]))
+        except (ValueError, TypeError):
             abort(400, "Invalid resume_at")
 
     name = ""
@@ -672,12 +743,13 @@ def playlist_play():
     return "ok"
 
 
-@app.get("/api/playlist/remove")
+@app.post("/api/playlist/remove")
 def playlist_remove():
     require_token()
     _, cid = require_sid()
+    require_playlist_control()
 
-    playlist_id = request.args.get("id", "").strip()
+    playlist_id = str((request.json or {}).get("id", "")).strip()
     if not playlist_id:
         abort(400, "Missing id")
 
@@ -693,45 +765,17 @@ def playlist_remove():
     return "ok"
 
 
-@app.get("/api/playlist/clear")
+@app.post("/api/playlist/clear")
 def playlist_clear():
     require_token()
     _, cid = require_sid()
+    require_playlist_control()
 
     vlc_get("/requests/status.xml", params={"command": "pl_empty"})
     mark_api_action("playlist_clear", cid=cid)
     log_event("action", who="web", cid=cid, op="playlist_clear")
     return "ok"
 
-
-@app.get("/api/playlist/add")
-def playlist_add():
-    require_token()
-    _, cid = require_sid()
-
-    uri = request.args.get("uri", "").strip()
-    if not uri:
-        abort(400, "Missing uri")
-
-    vlc_get("/requests/status.xml", params={"command": "in_enqueue", "input": uri})
-    mark_api_action("playlist_add", cid=cid, value=uri)
-    log_event("action", who="web", cid=cid, op="playlist_add", value=uri)
-    return "ok"
-
-
-@app.get("/api/playlist/playnow")
-def playlist_playnow():
-    require_token()
-    _, cid = require_sid()
-
-    uri = request.args.get("uri", "").strip()
-    if not uri:
-        abort(400, "Missing uri")
-
-    vlc_get("/requests/status.xml", params={"command": "in_play", "input": uri})
-    mark_api_action("playlist_playnow", cid=cid, value=uri)
-    log_event("action", who="web", cid=cid, op="playlist_playnow", value=uri)
-    return "ok"
 
 
 def _require_file_browse() -> None:
@@ -916,8 +960,9 @@ def files_list():
 
 
 def _resolve_file_arg() -> tuple[str, str, str]:
-    root_id = request.args.get("root", "").strip()
-    rel = request.args.get("path", "").strip()
+    body = request.json or {}
+    root_id = str(body.get("root", "")).strip()
+    rel = str(body.get("path", "")).strip()
 
     root_info = _resolve_root(root_id)
     if not root_info:
@@ -939,7 +984,7 @@ def _playlist_find_by_uri(uri: str) -> str | None:
     return None
 
 
-@app.get("/api/files/add")
+@app.post("/api/files/add")
 def files_add():
     require_token()
     _, cid = require_sid()
@@ -958,7 +1003,7 @@ def files_add():
     return jsonify({"status": "added"})
 
 
-@app.get("/api/files/play")
+@app.post("/api/files/play")
 def files_play():
     require_token()
     _, cid = require_sid()
@@ -967,12 +1012,12 @@ def files_play():
     root_id, rel, full = _resolve_file_arg()
     uri = _path_to_uri(full)
 
-    resume_at_raw = request.args.get("resume_at", "").strip()
+    body = request.json or {}
     resume_at = 0
-    if resume_at_raw:
+    if body.get("resume_at") not in (None, "", 0):
         try:
-            resume_at = max(0, int(resume_at_raw))
-        except ValueError:
+            resume_at = max(0, int(body["resume_at"]))
+        except (ValueError, TypeError):
             abort(400, "Invalid resume_at")
 
     existing = _playlist_find_by_uri(uri)
@@ -1125,4 +1170,5 @@ def client_count_safe() -> int:
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
+    _port = int(_SYS.get("port", os.environ.get("PORT", "5000")))
+    app.run(host="0.0.0.0", port=_port)

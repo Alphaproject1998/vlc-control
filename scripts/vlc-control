@@ -5,7 +5,7 @@ set -euo pipefail
 vlc-control runner
 
 Starts the Python bridge and optionally a Cloudflare quick tunnel.
-Reads config from ~/.config/vlc-control/config.env (or XDG overrides).
+Reads config from ~/.config/vlc-control/config.toml (or XDG overrides).
 DOC
 
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"
@@ -23,42 +23,39 @@ Options:
 H
 }
 
-# Custom parser instead of `source` so config.env can't run shell.
-load_env_file() {
-  local file="$1"
-  [[ -f "$file" ]] || return 1
+_read_system_config() {
+  python3 - "$1" <<'PY'
+import sys
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        print("ERROR: tomllib unavailable. Python 3.11+ required, or install tomli.", file=sys.stderr)
+        sys.exit(1)
+import shlex
 
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
+with open(sys.argv[1], "rb") as f:
+    c = tomllib.load(f)
 
-    [[ -z "$line" ]] && continue
-    [[ "$line" == \#* ]] && continue
-    [[ "$line" == *"="* ]] || continue
-
-    local key="${line%%=*}"
-    local val="${line#*=}"
-
-    key="${key%"${key##*[![:space:]]}"}"
-    key="${key#"${key%%[![:space:]]*}"}"
-    val="${val#"${val%%[![:space:]]*}"}"
-    val="${val%"${val##*[![:space:]]}"}"
-
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-
-    if [[ "$val" == \"*\" && "$val" == *\" ]]; then
-      val="${val:1:${#val}-2}"
-      val="${val//\\\"/\"}"
-      val="${val//\\\\/\\}"
-      val="${val//\\\$/\$}"
-      val="${val//\\\`/\`}"
-    elif [[ "$val" == \'*\' && "$val" == *\' ]]; then
-      val="${val:1:${#val}-2}"
-    fi
-
-    printf -v "$key" '%s' "$val"
-    export "$key"
-  done < "$file"
+s = c.get("system", {})
+fields = [
+    ("PORT", str(s.get("port", 5000))),
+    ("MAX_CLIENTS", str(s.get("max_clients", 2))),
+    ("GRACE_SECONDS", str(s.get("grace_seconds", 30))),
+    ("VLC_HOST", str(s.get("vlc_host", "127.0.0.1"))),
+    ("VLC_PORT", str(s.get("vlc_port", 8080))),
+    ("VLC_PASS", str(s.get("vlc_pass", ""))),
+    ("VLC_MODE", str(s.get("vlc_mode", "auto"))),
+    ("START_VLC", "yes" if s.get("start_vlc", True) else "no"),
+    ("KILL_VLC_ON_EXIT", "yes" if s.get("kill_vlc_on_exit", True) else "no"),
+    ("CLOUDFLARE", str(s.get("cloudflare", "auto"))),
+    ("LOG_DIR", str(s.get("log_dir", "/tmp"))),
+]
+for k, v in fields:
+    print(f"{k}={shlex.quote(v)}")
+PY
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -71,9 +68,6 @@ SEATS_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -s|--seats)
-      #shift
-      #SEATS_OVERRIDE="${1:-}"
-      #shift || true
       if ! [[ "$2" =~ ^[0-9]+$ ]] || (( $2 < 1 || $2 > 99 )); then
       echo "[!] --seats requires a numeric value (1..99)" >&2
       exit 2
@@ -98,30 +92,23 @@ while [[ $# -gt 0 ]]; do
 done
 
 CONFIG_DIR="${VLC_CONTROL_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vlc-control}"
-CFG_ENV="$CONFIG_DIR/config.env"
+CFG_TOML="$CONFIG_DIR/config.toml"
 
-if [[ ! -f "$CFG_ENV" ]]; then
-  echo "Missing config: $CFG_ENV" >&2
+if [[ ! -f "$CFG_TOML" ]]; then
+  echo "Missing config: $CFG_TOML" >&2
   echo "Run install.sh to create it." >&2
   exit 1
 fi
 
-load_env_file "$CFG_ENV" || {
-  echo "Failed to load config: $CFG_ENV" >&2
+_config_output="$(_read_system_config "$CFG_TOML")" || {
+  echo "Failed to load config: $CFG_TOML" >&2
   exit 1
 }
+eval "$_config_output"
 
-: "${PORT:?Missing PORT in config.env}"
-: "${MAX_CLIENTS:?Missing MAX_CLIENTS in config.env}"
-: "${GRACE_SECONDS:?Missing GRACE_SECONDS in config.env}"
-: "${VLC_HOST:?Missing VLC_HOST in config.env}"
-: "${VLC_PORT:?Missing VLC_PORT in config.env}"
-: "${VLC_PASS:=}"
-: "${VLC_MODE:=auto}"
-: "${START_VLC:=yes}"
-: "${KILL_VLC_ON_EXIT:=yes}"
-: "${CLOUDFLARE:=auto}"
-: "${LOG_DIR:=/tmp}"
+: "${PORT:?Missing port in config.toml [system]}"
+: "${VLC_HOST:?Missing vlc_host in config.toml [system]}"
+: "${VLC_PORT:?Missing vlc_port in config.toml [system]}"
 mkdir -p "${LOG_DIR}"
 LOG_DIR="$(cd "${LOG_DIR}" && pwd)"
 
@@ -148,7 +135,7 @@ export TOKEN
 export VLC_CONTROL_CONFIG_DIR="$CONFIG_DIR"
 
 VLC_URL="http://${VLC_HOST}:${VLC_PORT}"
-export VLC_URL VLC_PASS MAX_CLIENTS GRACE_SECONDS PORT
+export VLC_URL VLC_PASS MAX_CLIENTS GRACE_SECONDS PORT LOG_DIR
 
 PIDFILE="${LOG_DIR}/vlc-control-bridge.pid"
 

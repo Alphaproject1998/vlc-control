@@ -79,10 +79,6 @@ const playlistSelected = new Set();
 let fileBrowserMultiActive = false;
 const fileBrowserSelected = new Set();
 
-//function getUiConfigSafe(){
-//    return (typeof window !== "undefined" && window.uiConfig) ? window.uiConfig : {};
-//}
-
 function getSeekJumpBy(){
     const config = window.uiConfig.config;
     const val = (config && Number(config.seekJumpBy)) ? Number(config.seekJumpBy) : 10;
@@ -232,7 +228,6 @@ function applyUiConfigToDom(){
     if (seekBarEl){
         seekBarEl.dataset.readonly = allowSeeking ? "0" : "1";
         seekBarEl.style.pointerEvents = allowSeeking ? "" : "none";
-        //if (layout.showSeekBar === false) seekBarEl.style.pointerEvents = "none";
     }
 
     _normalizeButtonRowPairs([
@@ -255,18 +250,34 @@ function applyUiConfigToDom(){
     }
 }
 
+function deepMerge(target, source) {
+    for (const key of Object.keys(source)) {
+        const sv = source[key];
+        const tv = target[key];
+        if (sv !== null && typeof sv === "object" && !Array.isArray(sv) &&
+            tv !== null && typeof tv === "object" && !Array.isArray(tv)) {
+            deepMerge(tv, sv);
+        } else {
+            target[key] = sv;
+        }
+    }
+    return target;
+}
+
 async function loadFrontendConfig(){
     const loaderText = document.getElementById("loaderText");
     try{
         if (loaderText) loaderText.textContent = "Loading config…";
-        const response = await fetch("/frontend.json", { cache: "no-store" });
+        const t = new URLSearchParams(location.search).get("t") || "";
+        if (!t) return false;
+        const response = await fetch(`/api/config?t=${encodeURIComponent(t)}`, { cache: "no-store" });
         if (!response.ok) return false;
         const fetchedConfig = await response.json();
-        Object.assign(window.uiConfig, fetchedConfig || {});
+        deepMerge(window.uiConfig, fetchedConfig || {});
         return true;
     }catch(err){
-        if (loaderText) loaderText.textContent = "Config error (frontend.json)";
-        console.warn("frontend.json load failed:", err);
+        if (loaderText) loaderText.textContent = "Config error (/api/config)";
+        console.warn("/api/config load failed:", err);
         return false;
     }
 }
@@ -331,10 +342,28 @@ function getSidSafe(){ return window.__sid || ""; }
 
 async function apiGet(path){
     const t = getTokenSafe();
-    const sid = getSidSafe();
     const join = path.includes("?") ? "&" : "?";
-    const url = `${path}${join}t=${encodeURIComponent(t)}&sid=${encodeURIComponent(sid)}`;
-    const response = await fetch(url, { cache: "no-store" });
+    const url = `${path}${join}t=${encodeURIComponent(t)}`;
+    const response = await fetch(url, {
+        cache: "no-store",
+        headers: { "X-Session-Id": getSidSafe() },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response;
+}
+
+async function apiPost(path, body = {}){
+    const t = getTokenSafe();
+    const url = `${path}?t=${encodeURIComponent(t)}`;
+    const response = await fetch(url, {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+            "Content-Type": "application/json",
+            "X-Session-Id": getSidSafe(),
+        },
+        body: JSON.stringify(body),
+    });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response;
 }
@@ -622,7 +651,7 @@ async function seekVal(val){
 
     setUiBusy(true, "Sending…");
     try{
-        await apiGet(`/api/seek?val=${encodeURIComponent(val)}`);
+        await apiPost("/api/seek", { val });
     }catch(e){
         console.error("seekVal failed", e);
     }finally{
@@ -631,9 +660,6 @@ async function seekVal(val){
 }
 
 async function seekBy(deltaSeconds){
-    //const cfg = getUiConfigSafe();
-    //const cfg = window.uiConfig;
-    //if (cfg.features && cfg.features.allowSeeking === false) return;
     if (window.uiConfig.features && window.uiConfig.features.allowSeeking === false) return;
 
     const status = window.__lastStatus || {};
@@ -644,7 +670,7 @@ async function seekBy(deltaSeconds){
 
     setUiBusy(true, "Sending…");
     try{
-        await apiGet(`/api/seek?val=${encodeURIComponent(String(Math.floor(target)))}`);
+        await apiPost("/api/seek", { val: String(Math.floor(target)) });
     }catch(e){
         console.error("seekBy failed", e);
     }finally{
@@ -689,7 +715,7 @@ async function sendApiCommand(which){
     if (!sid) return;
     setUiBusy(true, "Sending…");
     try{
-        await apiGet(`/api/${which}`);
+        await apiPost(`/api/${which}`);
     } catch (e){
         console.error("command failed", which, e);
     } finally {
@@ -1159,7 +1185,7 @@ async function playlistMultiRemove(){
     const failed = [];
     for (const id of selectedIds){
         try{
-            await apiGet(`/api/playlist/remove?id=${encodeURIComponent(id)}`);
+            await apiPost("/api/playlist/remove", { id });
             playlistSelected.delete(id);
         }catch(e){
             const item = playlistItems.find(it => String(it.id) === id);
@@ -1297,7 +1323,6 @@ resumeModal.addEventListener("click", (e) => {
 
 async function requestPlaylistPlay(item){
     if(!sid || !item) return;
-    //const features = getUiConfigSafe().features || {};
     const features = window.uiConfig.features || {};
     if(features.resumePrompt !== false && isSignificantProgress(item)){
         const choice = await openResumeModal(item);
@@ -1314,11 +1339,9 @@ async function playlistPlay(id, resumeAt){
     if(!sid) return;
     setUiBusy(true, "Sending…");
     try{
-        let url = `/api/playlist/play?id=${encodeURIComponent(id)}`;
-        if(Number.isFinite(resumeAt) && resumeAt > 0){
-            url += `&resume_at=${encodeURIComponent(Math.floor(resumeAt))}`;
-        }
-        await apiGet(url);
+        const body = { id };
+        if (Number.isFinite(resumeAt) && resumeAt > 0) body.resume_at = Math.floor(resumeAt);
+        await apiPost("/api/playlist/play", body);
         closePlaylist();
     }catch(e){
         console.error("playlist play failed", e);
@@ -1330,7 +1353,7 @@ async function playlistPlay(id, resumeAt){
 async function playlistRemove(id){
     if(!sid) return;
     try{
-        await apiGet(`/api/playlist/remove?id=${encodeURIComponent(id)}`);
+        await apiPost("/api/playlist/remove", { id });
     }catch(e){
         console.error("playlist remove failed", e);
     }
@@ -1341,7 +1364,7 @@ async function playlistClear() {
     if (!confirm("Clear the entire playlist?")) return;
     setUiBusy(true, "Sending…");
     try{
-        await apiGet("/api/playlist/clear");
+        await apiPost("/api/playlist/clear");
     }catch(e){
         console.error("playlist clear failed", e);
     }finally{
@@ -1996,7 +2019,7 @@ async function fileBrowserMultiAdd(){
         const name = li.dataset.entryName;
         try{
             const rel = fileBrowserChildPath(name);
-            await apiGet(`/api/files/add?root=${encodeURIComponent(fileBrowserState.rootId)}&path=${encodeURIComponent(rel)}`);
+            await apiPost("/api/files/add", { root: fileBrowserState.rootId, path: rel });
             fileBrowserSelected.delete(li.dataset.key);
             li.classList.remove("is-selected");
         }catch(e){
@@ -2052,7 +2075,7 @@ async function fileBrowserMultiRemove(){
     const successKeys = new Set();
     for (const item of toRemove){
         try{
-            await apiGet(`/api/playlist/remove?id=${encodeURIComponent(item.id)}`);
+            await apiPost("/api/playlist/remove", { id: item.id });
             successKeys.add(item.key);
         }catch(e){
             failed.push(item.name);
@@ -2167,7 +2190,7 @@ async function filesAdd(name){
     const rel = fileBrowserChildPath(name);
     setUiBusy(true, "Adding…");
     try{
-        const response = await apiGet(`/api/files/add?root=${encodeURIComponent(fileBrowserState.rootId)}&path=${encodeURIComponent(rel)}`);
+        const response = await apiPost("/api/files/add", { root: fileBrowserState.rootId, path: rel });
         const data = await response.json().catch(() => ({}));
         if (data.status === "already_present"){
             showToast(`Already in playlist: ${name}`, "info");
@@ -2188,7 +2211,6 @@ async function filesPlay(name){
 
     const entry = fileBrowserState.entries.find(item => item.type === "file" && item.name === name);
     let resumeAt = 0;
-    //const features = getUiConfigSafe().features || {};
     const features = window.uiConfig.features || {};
     if (entry && features.resumePrompt !== false && isSignificantProgress(entry)){
         const choice = await openResumeModal(entry);
@@ -2200,8 +2222,9 @@ async function filesPlay(name){
 
     setUiBusy(true, "Sending…");
     try{
-        const qs = `root=${encodeURIComponent(fileBrowserState.rootId)}&path=${encodeURIComponent(rel)}${resumeAt > 0 ? `&resume_at=${resumeAt}` : ""}`;
-        const response = await apiGet(`/api/files/play?${qs}`);
+        const body = { root: fileBrowserState.rootId, path: rel };
+        if (resumeAt > 0) body.resume_at = resumeAt;
+        const response = await apiPost("/api/files/play", body);
         const data = await response.json().catch(() => ({}));
         if (data.status === "jumped"){
             showToast(resumeAt > 0 ? `Resuming: ${name}` : `Playing existing entry: ${name}`, "info");
@@ -2464,7 +2487,6 @@ startPolling();
         }
 
         await loadFrontendConfig();
-        //applyThemeVars(getUiConfigSafe().theme);
         applyThemeVars(window.uiConfig.theme);
         applyUiConfigToDom();
         applyClockDefaultFromConfig();

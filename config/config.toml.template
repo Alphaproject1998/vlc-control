@@ -1,0 +1,245 @@
+# VLC Control - configuration
+# Edit this file to customise your setup.
+# Restart vlc-control for changes to take effect.
+
+# ── System / backend ──────────────────────────────────────────────────────────
+# Server port, VLC connection, launch behaviour, and logging.
+# These settings are backend-only and are never sent to or visible by guests.
+
+[system]
+# Port the web bridge listens on (local only - Cloudflare tunnel exposes it externally)
+port = 5000
+
+# Max concurrent seats (unique browser sessions allowed at the same time)
+max_clients = 2
+
+# Seconds a seat stays reserved after a client disconnects.
+# Prevents another user from immediately stealing the slot while the browser refreshes.
+grace_seconds = 30
+
+# VLC HTTP interface address and port
+vlc_host = "127.0.0.1"
+vlc_port = 8080
+
+# VLC HTTP password (must match VLC's http-password setting)
+vlc_pass = ""
+
+# How to find/launch VLC: auto | native | flatpak | none
+# auto - try flatpak first, fall back to native; none - never start VLC automatically
+vlc_mode = "auto"
+
+# Start VLC automatically if its HTTP interface isn't reachable on launch
+start_vlc = true
+
+# Stop VLC when vlc-control exits.
+# Only applies if vlc-control started VLC itself. A pre-existing VLC is never touched.
+kill_vlc_on_exit = true
+
+# Cloudflare quick tunnel for remote access: auto | on | off
+# auto - use tunnel if cloudflared is installed, skip if not
+# on   - require tunnel, fail if cloudflared is missing
+# off  - local access only, never start a tunnel
+cloudflare = "auto"
+
+# Directory for log and PID files
+log_dir = "/tmp"
+
+
+# ── File browser ──────────────────────────────────────────────────────────────
+# Controls what parts of your filesystem guests can browse and queue.
+# All access is validated server-side against the roots and filters defined here
+# guests cannot navigate outside what you explicitly allow.
+
+[file_browse]
+# Master switch - must be true for the file browser to work at all
+enabled = false
+
+# Automatically expose the directory of the currently-playing file as a browse root.
+# Lets guests see and queue files from the same folder without revealing the full path.
+auto = true
+
+# Allow navigating into subdirectories of the auto-exposed folder.
+# false (default) = flat view, files in that one directory only
+auto_recursive = false
+
+# Explicit root directories guests can browse.
+# Append /* to a path to allow navigating its subdirectories.
+# Example: dirs = ["/mnt/media/movies", "/mnt/media/shows/*"]
+dirs = []
+
+# File extensions to show. Anything not in this list is hidden entirely.
+extensions = ["mp4", "mkv", "avi", "mov", "webm", "mp3", "flac", "ogg", "m4a", "opus", "wav"]
+
+# Hide directories whose path contains any of these segments (case-insensitive).
+# A multi-segment entry like "comp/vids" matches that sequence anywhere under a root.
+# Example: blacklist_dirs = ["secret", "comp/vids", "private"]
+blacklist_dirs = []
+
+# Hide any file or directory whose name contains one of these substrings (case-insensitive).
+# Example: blacklist_terms = ["nsfw", "_hidden", ".private"]
+blacklist_terms = []
+
+# How to format file paths in logs.
+# true  - "/RootName/relative/path" (always relative to the browse root, cleaner)
+# false - relative when inside the now-playing folder, full absolute path otherwise
+log_root_relative = true
+
+
+# ── Features ──────────────────────────────────────────────────────────────────
+# Turn features on or off. Flags marked [server] are enforced on the backend -
+# the API call is blocked outright, not just the button. Unmarked flags are
+# client-side UI only and control behaviour inside the browser.
+
+[features]
+# [server] Allow clients to seek (scrub the playback position)
+allow_seeking = true
+
+# [server] Allow clients to modify the playlist (play item, remove, clear)
+playlist_control = true
+
+# Show a resume prompt when re-opening a partially-watched item
+resume_prompt = true
+
+# Show a confirmation dialog before removing items from the playlist
+remove_prompt = true
+
+# Enable keyboard shortcuts in the browser (space=play/pause, arrows=seek, etc.)
+keyboard_events = true
+
+# Update the browser tab title to show the currently-playing track
+update_tab_title = true
+
+# Enable multi-select mode in the playlist (checkbox + bulk remove)
+playlist_select_multi = true
+
+# Enable multi-select mode in the file browser (checkbox + bulk add/remove)
+file_browser_select_multi = true
+
+
+# ── Layout ────────────────────────────────────────────────────────────────────
+# Controls visibility of individual UI sections and elements.
+# false hides the element but does not disable any underlying feature.
+
+[layout]
+# Header bar (title and subtitle text)
+show_title_bar = true
+
+# Now-playing track title
+show_now_playing = true
+
+# Seek / scrub bar
+show_seek_bar = true
+# Time tooltip that appears while dragging the seek bar
+show_seek_preview = true
+
+# Status chips row (state, clock, client count, connection indicator)
+show_system_status = true
+show_state = true           # "state: playing / paused" chip
+show_clock = true           # elapsed / remaining time chip
+show_clients = true         # "clients: x/y" chip
+show_ws_status = true       # WebSocket connection status chip
+
+# Main playback control buttons grid
+show_buttons = true
+# Emoji icons on buttons (disable for a text-only look)
+show_icons = true
+
+# Footer hint text at the bottom of the card
+show_footer = true
+
+# Playlist button and modal
+show_playlist = true
+# Show previous/next track names in button tooltips
+show_playlist_prev_next = true
+# Track count chip on the playlist button
+show_playlist_progress_entries = true
+# Progress timestamps (e.g. "4:12 / 1:23:45") on playlist rows
+show_playlist_progress_time = true
+# Highlight partially-watched items with a resume accent colour
+show_playlist_progress_time_resume = true
+# Multiselect toolbar inside the playlist modal
+show_playlist_select_multi = true
+
+# File browser modal (also requires file_browse.enabled = true to function)
+show_file_browser = true
+# Search/filter input inside the file browser
+show_file_browser_search = true
+# File size next to each file entry
+show_file_browser_file_size = true
+# Emoji icons for files and folders
+show_file_browser_file_icons = true
+# Playing/queued/partial progress indicator badge on file entries
+show_file_browser_file_indicator = true
+# Group files by extension with section headers
+show_file_browser_files_grouped = true
+# Multiselect toolbar inside the file browser modal
+show_file_browser_select_multi = true
+
+
+# ── Buttons ───────────────────────────────────────────────────────────────────
+# Show or hide individual controls. Hiding a button does not block the action
+# server-side - use [features] flags for that.
+
+[buttons]
+play_pause = true     # play / pause toggle
+stop = true           # stop playback
+previous = true       # previous track
+next = true           # next track
+seek_jumps = true     # -Xs / +Xs skip buttons (duration set by config.seek_jump_by)
+playlist = true       # open playlist button
+clear_playlist = true # clear all tracks button inside the playlist modal
+remove_track = true   # per-row remove button inside the playlist modal
+add_file = true       # add-to-playlist button on file browser entries
+play_file = true      # play-now button on file browser entries
+
+
+# ── UI text ───────────────────────────────────────────────────────────────────
+# Text shown in the interface. Displayed to guests.
+
+[ui]
+title = "VLC Control Share"
+subtitle = ""
+footer_text = "Tip: spacebar to play / pause."
+
+
+# ── Defaults & thresholds ────────────────────────────────────────────────────
+# Adjustable defaults for playback and UI behaviour. Most of these can be
+# overridden per-session by guests (e.g. the clock toggle), but this sets
+# what they see on first load.
+
+[config]
+# Seconds to jump when using the -Xs / +Xs seek buttons
+seek_jump_by = 10
+
+# Show remaining time (e.g. -1:23:45) instead of elapsed by default.
+# Guests can always toggle this by clicking the clock chip.
+clock_show_remaining = false
+
+# Resume prompt thresholds - controls when "resume from X?" is shown.
+# The prompt appears when watched time is between the floor and ceiling:
+#   floor = max(duration * resume_min_percent / 100, resume_min_seconds)
+#   ceil  = min(duration * resume_max_percent / 100, duration - resume_tail_seconds)
+resume_min_percent = 5      # ignore progress below this % of total duration
+resume_min_seconds = 10     # ignore progress shorter than this many seconds
+resume_max_percent = 95     # treat as finished above this % of total duration
+resume_tail_seconds = 300   # also treat as finished if less than this many seconds remain
+
+# Open the file browser in grid layout by default (guests can toggle per-session)
+file_browser_as_grid = false
+
+
+# ── Theme ─────────────────────────────────────────────────────────────────────
+# CSS colour variables. Accepts any valid CSS colour value (hex, rgb, rgba, etc.)
+
+[theme]
+background = "#0b0f14"                  # page / app background
+panel = "#101826"                       # main card background
+panel2 = "#0e1522"                      # secondary surfaces (modals, toolbars)
+text = "#e8eef6"                        # primary text
+muted = "#a8b3c4"                       # secondary / subdued text
+border = "rgba(255,255,255,.08)"        # borders and dividers
+shadow = "0 10px 30px rgba(0,0,0,.45)"  # card drop shadow (full CSS value)
+radius = "15px"                         # corner radius (full CSS value)
+accent = "#7c3aed"                      # primary action colour (buttons, focus rings)
+danger = "#ef4444"                      # destructive action colour (stop, remove)
+ok = "#22c55e"                          # positive / success colour

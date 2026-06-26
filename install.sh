@@ -184,22 +184,19 @@ SRC_VLC_BRIDGE="${SRC_BACKEND}/vlc-bridge.py"
 SRC_CLI="${SRC_SCRIPTS}/vlc-control"
 SRC_REQUIREMENTS="${REPO_DIR}/requirements.txt"
 
-SRC_ENV_TEMPLATE="${SRC_CONFIG}/config.env.template"
-SRC_FRONTEND_TEMPLATE="${SRC_CONFIG}/frontend.json.template"
+SRC_TOML_TEMPLATE="${SRC_CONFIG}/config.toml.template"
 
-DST_ENV="${CONFIG_DIR}/config.env"
-DST_FRONTEND="${CONFIG_DIR}/frontend.json"
+DST_TOML="${CONFIG_DIR}/config.toml"
 
 [[ -d "$SRC_BACKEND" ]] || die "Missing directory: ${SRC_BACKEND}"
 [[ -d "$SRC_STATIC"  ]] || die "Missing directory: ${SRC_STATIC}"
 [[ -d "$SRC_SCRIPTS" ]] || die "Missing directory: ${SRC_SCRIPTS}"
 [[ -d "$SRC_CONFIG"  ]] || die "Missing directory: ${SRC_CONFIG}"
 
-[[ -f "$SRC_VLC_BRIDGE" ]]        || die "Missing: ${SRC_VLC_BRIDGE}"
-[[ -f "$SRC_CLI" ]]               || die "Missing: ${SRC_CLI}"
-[[ -f "$SRC_REQUIREMENTS" ]]      || die "Missing: ${SRC_REQUIREMENTS}"
-[[ -f "$SRC_ENV_TEMPLATE" ]]      || die "Missing: ${SRC_ENV_TEMPLATE}"
-[[ -f "$SRC_FRONTEND_TEMPLATE" ]] || die "Missing: ${SRC_FRONTEND_TEMPLATE}"
+[[ -f "$SRC_VLC_BRIDGE" ]]     || die "Missing: ${SRC_VLC_BRIDGE}"
+[[ -f "$SRC_CLI" ]]            || die "Missing: ${SRC_CLI}"
+[[ -f "$SRC_REQUIREMENTS" ]]   || die "Missing: ${SRC_REQUIREMENTS}"
+[[ -f "$SRC_TOML_TEMPLATE" ]]  || die "Missing: ${SRC_TOML_TEMPLATE}"
 
 snapshot_existing
 
@@ -355,119 +352,75 @@ cp -a "${REPO_DIR}/static/." "${PREFIX}/static/"
 
 mkdir -p "${CONFIG_DIR}"
 
-merge_env_defaults() {
+merge_toml_defaults() {
   local src="$1"
   local dst="$2"
   [[ -f "$src" && -f "$dst" ]] || { echo 0; return 0; }
 
   python3 - "$src" "$dst" <<'PY'
-import sys, re, pathlib
+import sys, pathlib
 
-src = pathlib.Path(sys.argv[1])
-dst = pathlib.Path(sys.argv[2])
-
-key_pat = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
-
-dst_text = dst.read_text(encoding="utf-8")
-dst_keys = set()
-for line in dst_text.splitlines():
-    m = key_pat.match(line)
-    if m:
-        dst_keys.add(m.group(1))
-
-added = []
-pending = []
-for line in src.read_text(encoding="utf-8").splitlines():
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#"):
-        pending.append(line)
-        continue
-    m = key_pat.match(line)
-    if not m:
-        pending = []
-        continue
-    key = m.group(1)
-    if key in dst_keys:
-        pending = []
-        continue
-    added.extend(pending)
-    added.append(line)
-    pending = []
-
-count = sum(1 for l in added if key_pat.match(l))
-if count:
-    if not dst_text.endswith("\n"):
-        dst_text += "\n"
-    if not dst_text.endswith("\n\n"):
-        dst_text += "\n"
-    dst_text += "\n".join(added) + "\n"
-    dst.write_text(dst_text, encoding="utf-8")
-
-print(count)
-PY
-}
-
-if [[ ! -f "${DST_ENV}" ]]; then
-  cp -f "${REPO_DIR}/config/config.env.template" "${DST_ENV}"
-  say "[*] Created ${DST_ENV}"
-else
-  say "[*] Keeping existing ${DST_ENV}"
-  ENV_ADDED="$(merge_env_defaults "${REPO_DIR}/config/config.env.template" "${DST_ENV}")"
-  if [[ -n "${ENV_ADDED}" && "${ENV_ADDED}" -gt 0 ]]; then
-    say "[*] Added ${ENV_ADDED} new key(s) from template to ${DST_ENV}"
-  fi
-fi
-
-merge_json_defaults() {
-  local src="$1"
-  local dst="$2"
-  [[ -f "$src" && -f "$dst" ]] || { echo 0; return 0; }
-
-  python3 - "$src" "$dst" <<'PY'
-import sys, json, pathlib
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        print(0); sys.exit(0)
 
 src = pathlib.Path(sys.argv[1])
 dst = pathlib.Path(sys.argv[2])
 
 try:
-    src_obj = json.loads(src.read_text(encoding="utf-8"))
-    dst_obj = json.loads(dst.read_text(encoding="utf-8"))
+    with open(src, "rb") as f: src_obj = tomllib.load(f)
+    with open(dst, "rb") as f: dst_obj = tomllib.load(f)
 except Exception:
-    print(0)
-    sys.exit(0)
+    print(0); sys.exit(0)
 
-def merge(s, d):
-    if not isinstance(s, dict) or not isinstance(d, dict):
-        return 0
-    n = 0
-    for k, v in s.items():
-        if k not in d:
-            d[k] = v
-            n += 1
-        elif isinstance(v, dict) and isinstance(d[k], dict):
-            n += merge(v, d[k])
-    return n
+def toml_val(v):
+    if isinstance(v, bool): return "true" if v else "false"
+    if isinstance(v, int): return str(v)
+    if isinstance(v, float): return str(v)
+    if isinstance(v, str): return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    if isinstance(v, list):
+        return "[" + ", ".join(toml_val(i) for i in v) + "]"
+    return str(v)
 
-added = merge(src_obj, dst_obj)
-if added:
-    dst.write_text(json.dumps(dst_obj, indent=2) + "\n", encoding="utf-8")
+additions = {}
+for section, vals in src_obj.items():
+    if not isinstance(vals, dict): continue
+    dst_sec = dst_obj.get(section, {})
+    if not isinstance(dst_sec, dict): continue
+    for key, val in vals.items():
+        if key not in dst_sec:
+            additions.setdefault(section, {})[key] = val
 
+if not additions:
+    print(0); sys.exit(0)
+
+dst_text = dst.read_text(encoding="utf-8")
+added = 0
+for section, keys in additions.items():
+    dst_text += f"\n# Added by update\n[{section}]\n"
+    for key, val in keys.items():
+        dst_text += f"{key} = {toml_val(val)}\n"
+        added += 1
+
+dst.write_text(dst_text, encoding="utf-8")
 print(added)
 PY
 }
 
-if [[ ! -f "${DST_FRONTEND}" ]]; then
-  cp -f "${REPO_DIR}/config/frontend.json.template" "${DST_FRONTEND}"
-  say "[*] Created ${DST_FRONTEND}"
+if [[ ! -f "${DST_TOML}" ]]; then
+  cp -f "${SRC_TOML_TEMPLATE}" "${DST_TOML}"
+  say "[*] Created ${DST_TOML}"
 else
-  say "[*] Keeping existing ${DST_FRONTEND}"
-  FE_ADDED="$(merge_json_defaults "${REPO_DIR}/config/frontend.json.template" "${DST_FRONTEND}")"
-  if [[ -n "${FE_ADDED}" && "${FE_ADDED}" -gt 0 ]]; then
-    say "[*] Added ${FE_ADDED} new key(s) from template to ${DST_FRONTEND}"
+  say "[*] Keeping existing ${DST_TOML}"
+  TOML_ADDED="$(merge_toml_defaults "${SRC_TOML_TEMPLATE}" "${DST_TOML}")"
+  if [[ -n "${TOML_ADDED}" && "${TOML_ADDED}" -gt 0 ]]; then
+    say "[*] Added ${TOML_ADDED} new key(s) from template to ${DST_TOML}"
   fi
 fi
-
-ln -sf "${DST_FRONTEND}" "${PREFIX}/static/frontend.json"
 
 VLC_CFG_CANDIDATES=(
   "${HOME}/.config/vlc/vlcrc"
@@ -488,38 +441,52 @@ read_vlc_pass_from_cfg() {
   return 0
 }
 
-set_env_kv() {
+set_toml_kv() {
   local file="$1"
-  local key="$2"
-  local value="$3"
+  local section="$2"
+  local key="$3"
+  local value="$4"
 
-  python3 - "$file" "$key" "$value" <<'PY'
+  python3 - "$file" "$section" "$key" "$value" <<'PY'
 import sys, re, pathlib
 
-path = pathlib.Path(sys.argv[1])
-key  = sys.argv[2]
-val  = sys.argv[3]
+path    = pathlib.Path(sys.argv[1])
+section = sys.argv[2]
+key     = sys.argv[3]
+value   = sys.argv[4]
 
-def shell_quote_double(s: str) -> str:
-    return '"' + s.replace('\\','\\\\').replace('"','\\"').replace('$','\\$').replace('`','\\`') + '"'
+toml_val = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+new_line = f"{key} = {toml_val}"
 
-new_line = f"{key}={shell_quote_double(val)}"
 text = path.read_text(encoding="utf-8") if path.exists() else ""
 lines = text.splitlines()
 
-pat = re.compile(rf"^{re.escape(key)}=")
+sec_re = re.compile(r"^\s*\[" + re.escape(section) + r"\]\s*$")
+next_re = re.compile(r"^\s*\[")
+key_re = re.compile(r"^\s*" + re.escape(key) + r"\s*=")
+
+in_sec = False
 replaced = False
 out = []
+
 for line in lines:
-    if pat.match(line):
+    if sec_re.match(line):
+        in_sec = True
+    elif in_sec and next_re.match(line):
+        if not replaced:
+            out.append(new_line)
+            replaced = True
+        in_sec = False
+    if in_sec and key_re.match(line):
         out.append(new_line)
         replaced = True
-    else:
-        out.append(line)
+        continue
+    out.append(line)
 
 if not replaced:
-    if out and out[-1].strip() != "":
+    if not out or out[-1].strip():
         out.append("")
+    out.append(f"[{section}]")
     out.append(new_line)
 
 path.write_text("\n".join(out) + "\n", encoding="utf-8")
@@ -549,10 +516,10 @@ if [[ -z "${VLC_PASS_VALUE}" ]]; then
   say "[*] Generated VLC HTTP password."
 fi
 
-set_env_kv "${DST_ENV}" "VLC_PASS" "${VLC_PASS_VALUE}"
+set_toml_kv "${DST_TOML}" "system" "vlc_pass" "${VLC_PASS_VALUE}"
 
 if [[ -n "${LOG_DIR_OVERRIDE}" ]]; then
-  set_env_kv "${DST_ENV}" "LOG_DIR" "${LOG_DIR_OVERRIDE}"
+  set_toml_kv "${DST_TOML}" "system" "log_dir" "${LOG_DIR_OVERRIDE}"
 fi
 
 vlc_write_cfg_kv() {
@@ -673,7 +640,7 @@ if [[ -n "$CUSTOM_PREFIX" ]]; then
 else
   say "- Run:        vlc-control"
 fi
-say "- Config:     ${DST_ENV}"
+say "- Config:     ${DST_TOML}"
 say "- Frontend:   ${PREFIX}/static/"
 say "- Uninstall:  ./install.sh uninstall"
 
