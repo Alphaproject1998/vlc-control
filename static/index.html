@@ -22,8 +22,8 @@
         </svg>
       </div>
       <div>
-        <h1>Alphaproject's Stream</h1>
-        <p class="sub">Work in progress.</p>
+        <h1 id="pageTitle">VLC Control</h1>
+        <p class="sub" id="pageSubtitle" hidden></p>
       </div>
     </header>
 
@@ -42,7 +42,7 @@
               <span class="chip" id="playlistCountChip" title="0 in playlist" style="cursor:pointer;" hidden>0</span>
             </div>
             <div class="chips">
-              <span class="chip" id="clients">clients: ?/?</span>
+              <span class="chip" id="clients" title="Click to view clients" style="cursor:pointer;">clients: ?/?</span>
               <span class="chip" id="ws">ws: waiting</span>
             </div>
           </div>
@@ -132,6 +132,27 @@
       <button id="btnResumeCancel">Cancel</button>
       <button id="btnResumeRestart">Start over</button>
       <button class="primary" id="btnResumeContinue">Resume</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="clientsModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="clientsModalTitle">
+    <div class="modal-header">
+      <h2 id="clientsModalTitle">Clients</h2>
+      <button class="icon-btn" id="btnClientsClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p id="clientsModalHint" class="client-roster-hint" hidden>Set a nickname so others can see who's who (optional).</p>
+      <ul class="client-roster" id="clientRoster"></ul>
+      <div class="client-nickname-section">
+        <label class="client-nickname-label" for="clientNicknameInput">Your nickname <small>24 characters</small></label>
+        <div class="client-nickname-row">
+          <input id="clientNicknameInput" type="text" maxlength="24" placeholder="Leave blank for none" autocomplete="off">
+          <button class="primary" id="btnClientNicknameSave">Save</button>
+        </div>
+        <p id="clientNicknameError" class="client-nickname-error" hidden></p>
+      </div>
     </div>
   </div>
 </div>

@@ -44,6 +44,19 @@ cloudflare = "auto"
 # Directory for log and PID files
 log_dir = "/tmp"
 
+# How to identify a client in logs/console when they haven't set a nickname.
+# numeric - join order, C1/C2/... (default) | cid - full client id | short_cid - first 6 chars | ip - remote address
+client_id_style = "numeric"
+
+# Max length for guest nicknames
+nickname_max_length = 24
+
+# Debounce window (ms) for play/pause/stop when multiple sources act at once.
+# If VLC's own state changes during the window, the host wins and buffered client commands are dropped.
+# Otherwise one buffered client is chosen at random.
+# 0 disables buffering - commands execute immediately, first-come-first-served.
+action_debounce_ms = 250
+
 
 # ── File browser ──────────────────────────────────────────────────────────────
 # Controls what parts of your filesystem guests can browse and queue.

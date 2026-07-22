@@ -45,15 +45,47 @@ confirm_default_yes() {
   [[ "$ans" =~ ^[Yy]$ ]]
 }
 
+detect_all_pms() {
+  have apt-get && echo "apt"
+  have dnf     && echo "dnf"
+  have yum     && echo "yum"
+  have pacman  && echo "pacman"
+  have zypper  && echo "zypper"
+  have apk     && echo "apk"
+  return 0
+}
+
+native_pm() {
+  [[ -r /etc/os-release ]] || return 1
+  local id id_like
+  id="$(. /etc/os-release; echo "$ID")"
+  id_like="$(. /etc/os-release; echo "${ID_LIKE:-}")"
+  case " ${id} ${id_like} " in
+    *debian*|*ubuntu*) echo apt ;;
+    *fedora*) echo dnf ;;
+    *rhel*|*centos*) echo yum ;;
+    *arch*) echo pacman ;;
+    *suse*) echo zypper ;;
+    *alpine*) echo apk ;;
+    *) return 1 ;;
+  esac
+}
+
 detect_pm() {
-  if have apt-get; then echo "apt"; return 0; fi
-  if have dnf; then echo "dnf"; return 0; fi
-  if have yum; then echo "yum"; return 0; fi
-  if have pacman; then echo "pacman"; return 0; fi
-  if have zypper; then echo "zypper"; return 0; fi
-  if have apk; then echo "apk"; return 0; fi
-  echo ""
-  return 1
+  local all=()
+  while IFS= read -r pm; do all+=("$pm"); done < <(detect_all_pms)
+  [[ "${#all[@]}" -gt 0 ]] || { echo ""; return 1; }
+
+  local native; native="$(native_pm || true)"
+  if [[ -n "$native" ]]; then
+    local pm
+    for pm in "${all[@]}"; do
+      [[ "$pm" == "$native" ]] && { echo "$pm"; return 0; }
+    done
+  fi
+
+  echo "${all[0]}"
+  return 0
 }
 
 pm_install() {
@@ -66,11 +98,43 @@ pm_install() {
       ;;
     dnf)    sudo dnf install -y "${pkgs[@]}" ;;
     yum)    sudo yum install -y "${pkgs[@]}" ;;
-    pacman) sudo pacman -Sy --noconfirm "${pkgs[@]}" ;;
+    pacman) sudo pacman -S --needed --noconfirm "${pkgs[@]}" ;;
     zypper) sudo zypper install -y "${pkgs[@]}" ;;
     apk)    sudo apk add "${pkgs[@]}" ;;
     *) return 1 ;;
   esac
+}
+
+pm_install_with_fallback() {
+  local pm="$1"; shift
+  local pkgs=("$@")
+
+  local all=()
+  while IFS= read -r cand; do all+=("$cand"); done < <(detect_all_pms)
+
+  while true; do
+    say "[*] Attempting install via ${pm}..."
+    pm_install "$pm" "${pkgs[@]}" && return 0
+
+    say "[!] Install via ${pm} failed."
+    local others=()
+    local cand
+    for cand in "${all[@]}"; do
+      [[ "$cand" == "$pm" ]] || others+=("$cand")
+    done
+    [[ "${#others[@]}" -gt 0 ]] || return 1
+
+    say "    Other package managers found on this system: ${others[*]}"
+    local choice
+    read -r -p "    Try a different one? (name, or blank to give up): " choice || true
+    [[ -n "$choice" ]] || return 1
+
+    local valid=0
+    for cand in "${others[@]}"; do [[ "$cand" == "$choice" ]] && valid=1; done
+    [[ "$valid" -eq 1 ]] || { say "[!] Not one of: ${others[*]}"; return 1; }
+
+    pm="$choice"
+  done
 }
 
 do_uninstall() {
@@ -198,7 +262,196 @@ DST_TOML="${CONFIG_DIR}/config.toml"
 [[ -f "$SRC_REQUIREMENTS" ]]   || die "Missing: ${SRC_REQUIREMENTS}"
 [[ -f "$SRC_TOML_TEMPLATE" ]]  || die "Missing: ${SRC_TOML_TEMPLATE}"
 
+validate_toml_config() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+
+  python3 - "$file" <<'PY'
+import sys, os, pathlib
+
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        sys.exit(0)
+
+path = pathlib.Path(sys.argv[1])
+try:
+    with open(path, "rb") as f:
+        cfg = tomllib.load(f)
+except Exception:
+    sys.exit(0)
+
+warnings = []
+
+def warn(section, key, msg):
+    warnings.append(f"{section}.{key}: {msg}")
+
+def is_bool(v): return isinstance(v, bool)
+def is_int(v): return isinstance(v, int) and not isinstance(v, bool)
+
+BOOL_SECTIONS = ("features", "layout", "buttons")
+
+SCHEMA = {
+    ("system", "port"): ("int_range", 1, 65535),
+    ("system", "max_clients"): ("int_min", 1),
+    ("system", "grace_seconds"): ("int_min", 0),
+    ("system", "vlc_host"): ("nonempty_str",),
+    ("system", "vlc_port"): ("int_range", 1, 65535),
+    ("system", "vlc_pass"): ("nonempty_str",),
+    ("system", "vlc_mode"): ("enum", ["auto", "native", "flatpak", "none"]),
+    ("system", "start_vlc"): ("bool",),
+    ("system", "kill_vlc_on_exit"): ("bool",),
+    ("system", "cloudflare"): ("enum", ["auto", "on", "off"]),
+    ("system", "log_dir"): ("writable_dir",),
+    ("system", "client_id_style"): ("enum", ["numeric", "cid", "short_cid", "ip"]),
+    ("system", "action_debounce_ms"): ("int_min", 0),
+    ("file_browse", "enabled"): ("bool",),
+    ("file_browse", "auto"): ("bool",),
+    ("file_browse", "auto_recursive"): ("bool",),
+    ("file_browse", "log_root_relative"): ("bool",),
+    ("file_browse", "dirs"): ("dir_list",),
+    ("config", "seek_jump_by"): ("int_min", 0),
+    ("config", "clock_show_remaining"): ("bool",),
+    ("config", "resume_min_percent"): ("int_range", 0, 100),
+    ("config", "resume_min_seconds"): ("int_min", 0),
+    ("config", "resume_max_percent"): ("int_range", 0, 100),
+    ("config", "resume_tail_seconds"): ("int_min", 0),
+    ("config", "file_browser_as_grid"): ("bool",),
+}
+
+def check(section, key, kind, v):
+    if kind == "bool":
+        if not is_bool(v): warn(section, key, f"expected true/false, got {v!r}")
+    elif kind == "int_min":
+        lo = SCHEMA[(section, key)][1]
+        if not is_int(v) or v < lo: warn(section, key, f"expected an integer >= {lo}, got {v!r}")
+    elif kind == "int_range":
+        lo, hi = SCHEMA[(section, key)][1], SCHEMA[(section, key)][2]
+        if not is_int(v) or not (lo <= v <= hi): warn(section, key, f"expected an integer between {lo} and {hi}, got {v!r}")
+    elif kind == "enum":
+        allowed = SCHEMA[(section, key)][1]
+        if v not in allowed: warn(section, key, f"expected one of {allowed}, got {v!r}")
+    elif kind == "nonempty_str":
+        if not isinstance(v, str) or not v.strip(): warn(section, key, "this is blank - the app will not work correctly without it")
+    elif kind == "writable_dir":
+        if not isinstance(v, str) or not v.strip():
+            warn(section, key, "blank log directory")
+            return
+        d = os.path.expanduser(v)
+        try:
+            os.makedirs(d, exist_ok=True)
+            if not os.access(d, os.W_OK):
+                warn(section, key, f"not writable: {d}")
+        except Exception as exc:
+            warn(section, key, f"cannot create/access {d}: {exc}")
+    elif kind == "dir_list":
+        if not isinstance(v, list):
+            warn(section, key, f"expected a list of paths, got {v!r}")
+            return
+        for entry in v:
+            base = str(entry)[:-2] if str(entry).endswith("/*") else str(entry)
+            if not os.path.isdir(os.path.expanduser(base)):
+                warn(section, key, f"directory does not exist: {base}")
+
+for section, vals in cfg.items():
+    if not isinstance(vals, dict):
+        continue
+    for key, v in vals.items():
+        if section in BOOL_SECTIONS:
+            check(section, key, "bool", v)
+        elif (section, key) in SCHEMA:
+            check(section, key, SCHEMA[(section, key)][0], v)
+
+if cfg.get("config", {}).get("resume_min_percent", 0) >= cfg.get("config", {}).get("resume_max_percent", 100):
+    warnings.append("config: resume_min_percent should be lower than resume_max_percent")
+
+for w in warnings:
+    print(w)
+PY
+}
+
+check_existing_toml() {
+  [[ -f "$DST_TOML" ]] || return 0
+  have python3 || return 0
+
+  local valid
+  valid="$(python3 - "$DST_TOML" <<'PY'
+import sys, re, pathlib
+
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        print("valid"); sys.exit(0)
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+
+HEADER_RE = re.compile(r'^\[([^\[\].\s]+)\]\s*$')
+
+def dedupe_duplicate_tables(text):
+    seen = set()
+    kept = []
+    dup_section = None
+    for line in text.split("\n"):
+        m = HEADER_RE.match(line.strip())
+        if m:
+            name = m.group(1)
+            if name in seen:
+                dup_section = name
+                continue
+            seen.add(name)
+            dup_section = None
+        if dup_section is None:
+            kept.append(line)
+    return "\n".join(kept)
+
+try:
+    tomllib.loads(text)
+    print("valid")
+except Exception:
+    try:
+        tomllib.loads(dedupe_duplicate_tables(text))
+        print("valid")
+    except Exception:
+        print("invalid")
+PY
+)"
+  local warnings=""
+  if [[ "$valid" == "valid" ]]; then
+    warnings="$(validate_toml_config "$DST_TOML")"
+  fi
+
+  if [[ "$valid" != "invalid" && -z "$warnings" ]]; then
+    return 0
+  fi
+
+  if [[ "$valid" == "invalid" ]]; then
+    say "[!] Existing config at ${DST_TOML} is not valid TOML."
+  else
+    say "[!] Config values that look wrong in ${DST_TOML}:"
+    while IFS= read -r line; do
+      say "    - ${line}"
+    done <<< "$warnings"
+  fi
+
+  if confirm_default_yes "Reset config to defaults?"; then
+    mkdir -p "$(dirname "$DST_TOML")"
+    cp -f "$SRC_TOML_TEMPLATE" "$DST_TOML"
+    say "[*] Reset ${DST_TOML} to defaults."
+  else
+    confirm_default_yes "Continue install anyway?" || die "Aborted: existing config has problems."
+  fi
+}
+
+check_existing_toml
+
 snapshot_existing
+trap 'restore_snapshot' ERR
 
 required_dep() {
   local label="$1"; shift
@@ -214,8 +467,7 @@ required_dep() {
   local pm; pm="$(detect_pm || true)"
   [[ -n "$pm" ]] || abort_and_uninstall "No supported package manager detected to install: ${label}"
 
-  say "[*] Attempting to install required dependency via ${pm}..."
-  if ! pm_install "$pm" "${pkgs[@]}"; then
+  if ! pm_install_with_fallback "$pm" "${pkgs[@]}"; then
     abort_and_uninstall "Failed to install required dependency: ${label}"
   fi
 
@@ -244,7 +496,7 @@ optional_dep() {
   fi
 
   if confirm_default_yes "Attempt to install ${label} via ${pm}?"; then
-    pm_install "$pm" "${pkgs[@]}" || true
+    pm_install_with_fallback "$pm" "${pkgs[@]}" || true
   fi
 
   if have "$bin"; then
@@ -320,7 +572,7 @@ ensure_any_clipboard() {
   fi
 
   if confirm_default_yes "Attempt to install ${want_pkg} via ${pm}?"; then
-    pm_install "$pm" "${want_pkg}" || true
+    pm_install_with_fallback "$pm" "${want_pkg}" || true
   fi
 
   tool="$(detect_clipboard || true)"
@@ -352,13 +604,13 @@ cp -a "${REPO_DIR}/static/." "${PREFIX}/static/"
 
 mkdir -p "${CONFIG_DIR}"
 
-merge_toml_defaults() {
+regenerate_toml_config() {
   local src="$1"
   local dst="$2"
-  [[ -f "$src" && -f "$dst" ]] || { echo 0; return 0; }
+  [[ -f "$src" && -f "$dst" ]] || { echo "0"; return 0; }
 
   python3 - "$src" "$dst" <<'PY'
-import sys, pathlib
+import re, sys, pathlib
 
 try:
     import tomllib
@@ -371,11 +623,56 @@ except ImportError:
 src = pathlib.Path(sys.argv[1])
 dst = pathlib.Path(sys.argv[2])
 
+HEADER_RE = re.compile(r'^\[([^\[\].\s]+)\]\s*$')
+KEY_RE = re.compile(r'^([A-Za-z0-9_]+)\s*=\s*')
+
+def dedupe_duplicate_tables(text):
+    lines = text.split("\n")
+    seen = set()
+    kept = []
+    orphan = {}
+    dup_section = None
+    for line in lines:
+        m = HEADER_RE.match(line.strip())
+        if m:
+            name = m.group(1)
+            if name in seen:
+                dup_section = name
+                continue
+            seen.add(name)
+            dup_section = None
+            kept.append(line)
+            continue
+        if dup_section is not None:
+            orphan.setdefault(dup_section, []).append(line)
+        else:
+            kept.append(line)
+    if not orphan:
+        return text
+    result = []
+    current_section = None
+    for line in kept:
+        m = HEADER_RE.match(line.strip())
+        if m:
+            current_section = m.group(1)
+        result.append(line)
+        if current_section in orphan:
+            result.extend(orphan.pop(current_section))
+    return "\n".join(result)
+
 try:
-    with open(src, "rb") as f: src_obj = tomllib.load(f)
-    with open(dst, "rb") as f: dst_obj = tomllib.load(f)
+    src_text = src.read_text(encoding="utf-8")
 except Exception:
     print(0); sys.exit(0)
+
+dst_text = dst.read_text(encoding="utf-8")
+try:
+    existing = tomllib.loads(dst_text)
+except Exception:
+    try:
+        existing = tomllib.loads(dedupe_duplicate_tables(dst_text))
+    except Exception:
+        existing = {}
 
 def toml_val(v):
     if isinstance(v, bool): return "true" if v else "false"
@@ -386,28 +683,63 @@ def toml_val(v):
         return "[" + ", ".join(toml_val(i) for i in v) + "]"
     return str(v)
 
-additions = {}
-for section, vals in src_obj.items():
-    if not isinstance(vals, dict): continue
-    dst_sec = dst_obj.get(section, {})
-    if not isinstance(dst_sec, dict): continue
-    for key, val in vals.items():
-        if key not in dst_sec:
-            additions.setdefault(section, {})[key] = val
+def split_value_and_comment(rest):
+    in_str = False
+    str_char = ""
+    depth = 0
+    i = 0
+    while i < len(rest):
+        c = rest[i]
+        if in_str:
+            if c == "\\" and i + 1 < len(rest):
+                i += 2
+                continue
+            if c == str_char:
+                in_str = False
+        elif c in ('"', "'"):
+            in_str = True
+            str_char = c
+        elif c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+        elif c == "#" and depth == 0:
+            return rest[:i], rest[i:]
+        i += 1
+    return rest, ""
 
-if not additions:
-    print(0); sys.exit(0)
+carried_over = 0
+current_section = None
+out_lines = []
+for line in src_text.split("\n"):
+    stripped = line.strip()
+    header_m = HEADER_RE.match(stripped)
+    if header_m:
+        current_section = header_m.group(1)
+        out_lines.append(line)
+        continue
 
-dst_text = dst.read_text(encoding="utf-8")
-added = 0
-for section, keys in additions.items():
-    dst_text += f"\n# Added by update\n[{section}]\n"
-    for key, val in keys.items():
-        dst_text += f"{key} = {toml_val(val)}\n"
-        added += 1
+    key_m = KEY_RE.match(stripped) if current_section else None
+    if key_m:
+        key = key_m.group(1)
+        section_vals = existing.get(current_section, {})
+        if isinstance(section_vals, dict) and key in section_vals:
+            new_val = section_vals[key]
+            rest = stripped[key_m.end():]
+            _, comment = split_value_and_comment(rest)
+            rendered = toml_val(new_val)
+            if rendered != rest[:len(rest) - len(comment)].rstrip():
+                carried_over += 1
+            new_line = f"{key} = {rendered}"
+            if comment:
+                new_line += f"  {comment}"
+            out_lines.append(new_line)
+            continue
 
-dst.write_text(dst_text, encoding="utf-8")
-print(added)
+    out_lines.append(line)
+
+dst.write_text("\n".join(out_lines), encoding="utf-8")
+print(carried_over)
 PY
 }
 
@@ -415,10 +747,10 @@ if [[ ! -f "${DST_TOML}" ]]; then
   cp -f "${SRC_TOML_TEMPLATE}" "${DST_TOML}"
   say "[*] Created ${DST_TOML}"
 else
-  say "[*] Keeping existing ${DST_TOML}"
-  TOML_ADDED="$(merge_toml_defaults "${SRC_TOML_TEMPLATE}" "${DST_TOML}")"
-  if [[ -n "${TOML_ADDED}" && "${TOML_ADDED}" -gt 0 ]]; then
-    say "[*] Added ${TOML_ADDED} new key(s) from template to ${DST_TOML}"
+  say "[*] Rebuilding ${DST_TOML} from the latest template, keeping your existing values..."
+  TOML_CARRIED="$(regenerate_toml_config "${SRC_TOML_TEMPLATE}" "${DST_TOML}")"
+  if [[ -n "${TOML_CARRIED}" && "${TOML_CARRIED}" -gt 0 ]]; then
+    say "[*] Carried over ${TOML_CARRIED} of your existing setting(s)"
   fi
 fi
 
@@ -428,7 +760,7 @@ VLC_CFG_CANDIDATES=(
 )
 
 generate_pass() {
-  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
+  tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 24 || true
 }
 
 read_vlc_pass_from_cfg() {
@@ -493,33 +825,79 @@ path.write_text("\n".join(out) + "\n", encoding="utf-8")
 PY
 }
 
-VLC_PASS_VALUE=""
+read_toml_kv() {
+  local file="$1"
+  local section="$2"
+  local key="$3"
 
-if confirm_default_yes "Check VLC config for existing HTTP password?"; then
-  for cfg in "${VLC_CFG_CANDIDATES[@]}"; do
-    if VLC_PASS_VALUE="$(read_vlc_pass_from_cfg "$cfg")"; then
-      say "[*] Found VLC HTTP password in: $cfg"
-      break
+  [[ -f "$file" ]] || return 0
+
+  python3 - "$file" "$section" "$key" <<'PY'
+import sys, pathlib
+
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        sys.exit(0)
+
+path, section, key = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+except Exception:
+    sys.exit(0)
+
+val = data.get(section, {}).get(key)
+if val:
+    print(val)
+PY
+}
+
+EXISTING_VLC_PASS="$(read_toml_kv "${DST_TOML}" "system" "vlc_pass")"
+
+if [[ -n "${EXISTING_VLC_PASS}" ]]; then
+  say "[*] Keeping existing VLC HTTP password already in ${DST_TOML}"
+  VLC_PASS_VALUE="${EXISTING_VLC_PASS}"
+else
+  VLC_PASS_VALUE=""
+
+  if confirm_default_yes "Check VLC config for existing HTTP password?"; then
+    for cfg in "${VLC_CFG_CANDIDATES[@]}"; do
+      if VLC_PASS_VALUE="$(read_vlc_pass_from_cfg "$cfg")"; then
+        say "[*] Found VLC HTTP password in: $cfg"
+        break
+      fi
+    done
+    if [[ -z "${VLC_PASS_VALUE}" ]]; then
+      say "[*] No VLC HTTP password found."
     fi
-  done
-  if [[ -z "${VLC_PASS_VALUE}" ]]; then
-    say "[*] No VLC HTTP password found."
   fi
-fi
 
-if [[ -z "${VLC_PASS_VALUE}" ]]; then
-  read -r -p "Enter VLC HTTP password (leave blank to generate): " VLC_PASS_VALUE || true
-fi
+  if [[ -z "${VLC_PASS_VALUE}" ]]; then
+    read -r -p "Enter VLC HTTP password (leave blank to generate): " VLC_PASS_VALUE || true
+  fi
 
-if [[ -z "${VLC_PASS_VALUE}" ]]; then
-  VLC_PASS_VALUE="$(generate_pass)"
-  say "[*] Generated VLC HTTP password."
-fi
+  if [[ -z "${VLC_PASS_VALUE}" ]]; then
+    VLC_PASS_VALUE="$(generate_pass)"
+    say "[*] Generated VLC HTTP password."
+  fi
 
-set_toml_kv "${DST_TOML}" "system" "vlc_pass" "${VLC_PASS_VALUE}"
+  set_toml_kv "${DST_TOML}" "system" "vlc_pass" "${VLC_PASS_VALUE}"
+fi
 
 if [[ -n "${LOG_DIR_OVERRIDE}" ]]; then
   set_toml_kv "${DST_TOML}" "system" "log_dir" "${LOG_DIR_OVERRIDE}"
+fi
+
+VALIDATION_WARNINGS="$(validate_toml_config "${DST_TOML}")"
+if [[ -n "${VALIDATION_WARNINGS}" ]]; then
+  say "[!] Config values that look wrong in ${DST_TOML} (install will continue):"
+  while IFS= read -r line; do
+    say "    - ${line}"
+  done <<< "${VALIDATION_WARNINGS}"
 fi
 
 vlc_write_cfg_kv() {
@@ -581,7 +959,18 @@ if [[ -z "$VLC_CFG_TARGET" ]]; then
   fi
 fi
 
-if confirm_default_yes "Configure VLC to enable HTTP control on startup with this password (so vlc-control can latch on later)?"; then
+vlc_http_already_configured() {
+  local cfg="$1"
+  [[ -f "$cfg" ]] || return 1
+  grep -qE '^[[:space:]]*extraintf=.*\bhttp\b' "$cfg" || return 1
+  local pass
+  pass="$(read_vlc_pass_from_cfg "$cfg")" || return 1
+  [[ "$pass" == "$VLC_PASS_VALUE" ]]
+}
+
+if vlc_http_already_configured "$VLC_CFG_TARGET"; then
+  say "[*] VLC HTTP control already enabled with the current password in ${VLC_CFG_TARGET}"
+elif confirm_default_yes "Configure VLC to enable HTTP control on startup with this password (so vlc-control can latch on later)?"; then
   if [[ -w "$(dirname "$VLC_CFG_TARGET")" ]] || [[ -w "$VLC_CFG_TARGET" ]] || [[ ! -e "$VLC_CFG_TARGET" ]]; then
     if vlc_try_configure_http "$VLC_CFG_TARGET"; then
       say "[*] Updated VLC config: ${VLC_CFG_TARGET}"
