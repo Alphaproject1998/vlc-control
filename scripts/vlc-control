@@ -181,7 +181,7 @@ start_vlc_if_needed() {
     else
       echo "[!] Detected something listening at ${VLC_URL}, but auth failed with current VLC_PASS."
       echo "    I will NOT start another VLC instance."
-      echo "    Fix: set VLC_PASS in ${CFG_ENV} to match VLC's HTTP password, or start VLC with that password."
+      echo "    Fix: set vlc_pass in ${CFG_TOML} to match VLC's HTTP password, or start VLC with that password."
       echo "[!] Aborting!"
       exit 1
     fi
@@ -346,56 +346,18 @@ start_cloudflared() {
   fi
 }
 
-HOSTLOG_LOCK="${LOG_DIR}/vlc-control-hostlog.lock"
 HOSTLOG_PIDFILE="${LOG_DIR}/vlc-control-hostlog.pid"
 
 start_hostlog() {
   stop_hostlog
 
-  local awkfile="${LOG_DIR}/vlc-hostlog.awk"
-  cat > "$awkfile" <<'AWK'
-function ts(){ cmd="date +\"%H:%M:%S\""; cmd|getline t; close(cmd); return t }
-$1!="EVENT"{ next }
-{
-  delete kv
-  for(i=2;i<=NF;i++){ split($i,a,"="); if(a[1]!="") kv[a[1]]=a[2] }
-
-  if(kv["type"]=="client_join"){
-    printf("[%s] [+] Client joined: %s (%s)\n", ts(), (kv["name"]?kv["name"]:"unknown"), (kv["cid"]?kv["cid"]:"?"))
-    fflush(); next
-  }
-
-  if(kv["type"]=="client_leave"){
-    printf("[%s] [-] Client left: %s\n", ts(), (kv["cid"]?kv["cid"]:"?"))
-    fflush(); next
-  }
-
-  if(kv["type"]=="action"){
-    who=kv["who"]?kv["who"]:"?"
-    cid=kv["cid"]?(" cid="kv["cid"]):""
-    op=kv["op"]?kv["op"]:"?"
-
-    detail=""
-    if(kv["at"]){
-      detail=" "kv["at"]
-      if(kv["length"]) detail=detail" / "kv["length"]
-    } else if(kv["value"]){
-      detail=" "kv["value"]
-    }
-
-    printf("[%s] [*] %s%s -> %s%s\n", ts(), who, cid, op, detail)
-    fflush(); next
-  }
-
-  printf("[%s] [?] %s\n", ts(), $0); fflush()
-}
-AWK
+  local tail_cmd="tail -n 0 -F \"${LOG_DIR}/vlc-bridge.log\" 2>/dev/null | \"$PREFIX/.venv/bin/python\" \"$PREFIX/vlc-bridge.py\" --tail"
 
   if command -v setsid >/dev/null 2>&1; then
-    setsid bash -c "tail -n 0 -F \"${LOG_DIR}/vlc-bridge.log\" 2>/dev/null | awk -f \"$awkfile\"" &
+    setsid bash -c "$tail_cmd" &
     echo $! > "$HOSTLOG_PIDFILE"
   else
-    ( tail -n 0 -F "${LOG_DIR}/vlc-bridge.log" 2>/dev/null | awk -f "$awkfile" ) &
+    ( bash -c "$tail_cmd" ) &
     echo $! > "$HOSTLOG_PIDFILE"
   fi
 }
@@ -414,6 +376,7 @@ stop_hostlog() {
 }
 
 cleanup() {
+  trap - INT TERM EXIT
   echo
   echo "[*] Stopping..."
   [[ -n "${CF_PID:-}" ]] && kill "$CF_PID" 2>/dev/null || true
@@ -423,6 +386,7 @@ cleanup() {
     kill "$VLC_PID" 2>/dev/null || true
   fi
   stop_hostlog
+  exit 0
 }
 trap cleanup INT TERM EXIT
 
@@ -430,13 +394,12 @@ start_vlc_if_needed || true
 start_bridge
 start_hostlog
 
-echo "[*] PATH=$PATH" >>"${LOG_DIR}/vlc-cloudflared.log"
-command -v cloudflared >>"${LOG_DIR}/vlc-cloudflared.log" 2>&1 || echo "[!] cloudflared not in PATH" >>"${LOG_DIR}/vlc-cloudflared.log"
-
 start_cloudflared
 
 echo
-echo "[OK] Running. Logs:"
+echo "[OK] Running."
+echo "Config: ${CFG_TOML}"
+echo "Logs:"
 echo " - ${LOG_DIR}/vlc-bridge.log"
 echo " - ${LOG_DIR}/vlc-http.log"
 echo " - ${LOG_DIR}/vlc-cloudflared.log"

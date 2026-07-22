@@ -2,7 +2,7 @@
 
 A self-hosted web remote for VLC. You run it on your machine, it gives you a link, and anyone with that link can control playback from their browser.
 
-Made for watch parties and shared streams where a few people need to pause, skip, or scrub through what's playing. Not meant for public use — it's a trusted-link setup, not an auth system.
+Made for watch parties and shared streams where a few people need to pause, skip, scrub, and queue up what's playing. Not meant for public use — it's a trusted-link setup, not an auth system.
 
 **Linux only for now.** Only tested on Arch, KDE 6, Wayland, NVIDIA. It'll probably work on other distros but nothing else has been verified yet.
 
@@ -10,11 +10,24 @@ Made for watch parties and shared streams where a few people need to pause, skip
 
 ## How it works
 
-The runner (`vlc-control`) starts a small Python server that talks to VLC's built-in HTTP API. Browsers connect over WebSocket and get real-time playback state (title, position, play/pause). Control commands go through the server to VLC.
+The runner (`vlc-control`) starts a small Python server that talks to VLC's built-in HTTP API. Browsers connect over WebSocket and get real-time playback state (title, position, play/pause, playlist). Control commands go through the server to VLC.
 
 If `cloudflared` is installed, a Cloudflare quick tunnel is started automatically so people outside your LAN can connect without port forwarding. The tunnel URL is printed (and copied to clipboard if possible) when the server starts. Each run gets a new tunnel URL and a new access token.
 
 **Stack:** Python (Flask + flask-sock) backend, vanilla HTML/CSS/JS frontend, VLC's HTTP interface.
+
+---
+
+## Features
+
+- Play / pause / stop / previous / next / seek, live-synced to every connected browser
+- Playlist modal - view what's queued, skip to a track, remove tracks, clear, multi-select for bulk removal
+- File browser - let guests browse directories you've whitelisted and queue files, with search, list/grid views, extension grouping, and multi-select. Off by default
+- Resume prompts - reopening a partially-watched item asks whether to resume or start over
+- Nicknames - guests can pick a name; a roster modal shows who's connected and for how long
+- Seat system - a configurable number of control slots, with a grace period so a dropped connection doesn't lose its seat
+- Conflict handling - if two people hit pause at once (or you act in VLC directly), one action wins cleanly instead of fighting
+- Fully themeable UI - colors, visible sections, and individual buttons all configurable
 
 ---
 
@@ -26,9 +39,10 @@ chmod +x install.sh
 ```
 
 The installer:
-- Checks for Python 3, curl (required), cloudflared, clipboard tools (optional)
+- Checks for Python 3 and curl (required), cloudflared and clipboard tools (optional)
 - Creates a Python venv with the dependencies
 - Copies files into XDG locations
+- Generates `config.toml` from the template, or validates and upgrades an existing one (your values are kept, new keys are added)
 - Optionally configures VLC's HTTP interface by editing `vlcrc`
 - Creates a `.desktop` entry so it shows up in app launchers
 
@@ -37,7 +51,7 @@ The installer:
 | What | Where |
 | ---- | ----- |
 | App files | `~/.local/share/vlc-control/` |
-| Config | `~/.config/vlc-control/` |
+| Config | `~/.config/vlc-control/config.toml` |
 | CLI command | `~/.local/bin/vlc-control` |
 | Desktop entry | `~/.local/share/applications/vlc-control.desktop` |
 
@@ -60,7 +74,7 @@ vlc-control
 Or launch "VLC Control" from your app menu.
 
 On startup it will:
-1. Load config from `~/.config/vlc-control/config.env`
+1. Load `~/.config/vlc-control/config.toml`
 2. Generate a fresh access token (new every run)
 3. Start VLC with HTTP control if it isn't already running
 4. Start the bridge server
@@ -81,136 +95,100 @@ The share link is what you send to people. Anyone with it can control playback.
 **CLI options:**
 
 ```
-vlc-control --seats 4     # override max clients for this run
+vlc-control --seats 4     # override max seats for this run
 vlc-control -s 1          # same, short form
 vlc-control --help
 ```
 
-The `--seats` flag overrides `MAX_CLIENTS` for that run only, doesn't touch the config file.
+The `--seats` flag overrides `max_clients` for that run only, doesn't touch the config file.
 
 ### Host log
 
 While running, the terminal shows a live log of what's happening:
 
 ```
-[14:32:01] [+] Client joined: abc123
-[14:32:05] [*] web cid=abc123 -> play
-[14:33:12] [*] web cid=abc123 -> seek 1:23 / 4:56
-[14:35:00] [*] host -> paused
-[14:36:10] [-] Client left: abc123
+[14:32:01] [+] C1 joined
+[14:32:05] [*] C1 paused playback
+[14:32:19] [*] Alex seeked to 12:04 / 34:10
+[14:33:02] [*] Playlist updated: Alex switched to "episode 2.mkv"
+[14:35:00] [*] Host resumed playback
+[14:36:10] [-] C1 left
 ```
 
-Actions from the browser are tagged `web`, actions from VLC directly (you clicking pause in VLC itself) are tagged `host`.
+Guests show up under their nickname if they've set one, otherwise a fallback identity (`C1`, `C2`, ... by default - see `client_id_style`). Actions VLC took without going through the web UI (you clicking pause in VLC itself) are attributed to `Host`.
 
 ---
 
 ## Configuration
 
-There are two config files that control different things:
+Everything lives in one file: `~/.config/vlc-control/config.toml`. It's heavily commented - the file itself is the full reference, this is just the map. Restart `vlc-control` after changing it.
 
-### `~/.config/vlc-control/config.env` — server / runtime
+| Section | What it controls |
+| ------- | ---------------- |
+| `[system]` | Server port, seats and grace period, VLC connection/launch, tunnel mode, logging, client identity, action debounce. Never sent to guests. |
+| `[file_browse]` | Whether guests can browse files at all, which directories, allowed extensions, blacklists. All enforced server-side. |
+| `[features]` | Feature switches. Flags marked `[server]` in the file (seeking, playlist control) block the API call itself, not just the button. |
+| `[layout]` | Show/hide individual UI sections - purely visual. |
+| `[buttons]` | Show/hide individual buttons - purely visual, use `[features]` to actually block an action. |
+| `[ui]` | Title, subtitle, and footer text guests see. |
+| `[config]` | Defaults and thresholds - seek jump size, clock mode, resume prompt tuning, file browser default view. |
+| `[theme]` | Full color palette via CSS variables, plus radius and shadow. |
 
-Controls how the server runs, how it connects to VLC, and how many people can connect. Requires a restart of `vlc-control` to take effect.
-
-| Variable | What it does | Default |
-| -------- | ------------ | ------- |
-| `PORT` | Port the bridge server listens on | `5000` |
-| `MAX_CLIENTS` | Max simultaneous controlling browsers | `2` |
-| `GRACE_SECONDS` | How long a disconnected client's seat is held | `30` |
-| `VLC_HOST` | VLC HTTP interface address | `127.0.0.1` |
-| `VLC_PORT` | VLC HTTP interface port | `8080` |
-| `VLC_PASS` | VLC HTTP password (set during install) | — |
-| `VLC_MODE` | Which VLC to use: `auto`, `flatpak`, `native`, `none` | `auto` |
-| `START_VLC` | Start VLC automatically if not running: `yes` / `no` | `yes` |
-| `CLOUDFLARE` | Tunnel behavior: `auto`, `on`, `off` | `on` |
-
-`TOKEN` is **not** in this file — it's generated fresh on every run and only lives in memory.
-
-`VLC_MODE=auto` checks for a Flatpak VLC first, then falls back to a native install. Set to `none` if you want to manage VLC yourself.
-
-`CLOUDFLARE=auto` starts a tunnel if `cloudflared` is installed, skips silently if not. `on` requires it and errors if missing. `off` disables it entirely.
-
-### `~/.config/vlc-control/frontend.json` — what the browser shows
-
-Controls the UI: text, colors, which elements are visible, which controls are enabled. Changes take effect on browser reload, no server restart needed.
-
-```json
-{
-  "title": "Alphaproject's Stream",
-  "subtitle": "Work in progress.",
-  "footerText": "Tip: spacebar to play / pause.",
-  "theme": { ... },
-  "layout": { ... },
-  "buttons": { ... },
-  "features": { ... },
-  "config": { ... }
-}
-```
-
-**Theme** — full color palette via CSS variables:
-
-| Key | What it sets |
-| --- | ------------ |
-| `background` | Page background |
-| `panel` | Card background |
-| `panel2` | Inner card sections |
-| `text` | Main text color |
-| `muted` | Secondary text |
-| `border` | Border color |
-| `shadow` | Card shadow |
-| `radius` | Corner rounding |
-| `accent` | Primary button color |
-| `danger` | Stop button / error color |
-| `ok` | Success indicator color |
-
-**Layout toggles** — show/hide individual UI sections:
-
-`showTitleBar`, `showNowPlaying`, `showSeekBar`, `showSeekPreview`, `showState`, `showClock`, `showClients`, `showWSStatus`, `showButtons`, `showIcons`, `showSystemStatus`, `showFooter`
-
-All default to `true`. Set any to `false` to hide that piece.
-
-**Button toggles:**
-
-`playPause`, `stop`, `previous`, `next`, `seekJumps` — each `true`/`false`.
-
-**Feature toggles:**
+A few `[system]` keys worth knowing about:
 
 | Key | What it does | Default |
 | --- | ------------ | ------- |
-| `allowSeeking` | Enable/disable the seek bar and seek buttons | `true` |
-| `keyboardEvents` | Enable/disable keyboard shortcuts | `true` |
-| `updateTabTitle` | Update the browser tab with the current track | `true` |
+| `port` | Port the bridge listens on (local only) | `5000` |
+| `max_clients` | Max simultaneous seats | `2` |
+| `grace_seconds` | How long a disconnected client's seat is held | `30` |
+| `vlc_mode` | Which VLC to use: `auto`, `flatpak`, `native`, `none` | `auto` |
+| `start_vlc` | Start VLC automatically if it isn't running | `true` |
+| `kill_vlc_on_exit` | Stop VLC on exit (only if vlc-control started it) | `true` |
+| `cloudflare` | Tunnel behavior: `auto`, `on`, `off` | `auto` |
+| `client_id_style` | Fallback guest identity: `numeric`, `cid`, `short_cid`, `ip` | `numeric` |
+| `action_debounce_ms` | Window for resolving simultaneous play/pause/stop presses | `250` |
 
-**Config values:**
+The access token is **not** in the config — it's generated fresh on every run and only lives in memory.
 
-| Key | What it does | Default |
-| --- | ------------ | ------- |
-| `seekJumpBy` | Seconds for the skip forward/back buttons | `10` |
-| `clockShowRemaining` | Default clock mode: remaining time instead of total | `false` |
+`cloudflare = "auto"` starts a tunnel if `cloudflared` is installed, skips silently if not. `on` requires it and errors if missing. `off` disables it entirely.
+
+### File browsing
+
+Off by default. When enabled, guests can only see what you explicitly allow:
+
+- `dirs` - whitelisted root directories (append `/*` to a path to allow its subdirectories)
+- `auto` - expose the folder of the currently-playing file without revealing its real path
+- `extensions` - anything not in the list is hidden entirely
+- `blacklist_dirs` / `blacklist_terms` - hide directories and names you never want shown
+
+All of it is validated server-side - path traversal is blocked and full paths never leave your machine, guests only ever see paths relative to a root.
 
 ---
 
 ## Keyboard shortcuts
 
-These work when the browser window is focused and `keyboardEvents` is enabled:
+These work when the browser window is focused and `keyboard_events` is enabled:
 
 | Key | Action |
 | --- | ------ |
 | `Space` | Play / Pause |
 | `N` | Next track |
 | `P` | Previous track |
-| `Arrow Left` | Seek back (by `seekJumpBy` seconds) |
-| `Arrow Right` | Seek forward (by `seekJumpBy` seconds) |
+| `Q` | Open / close the playlist |
+| `Arrow Left` | Seek back (by `seek_jump_by` seconds) |
+| `Arrow Right` | Seek forward (by `seek_jump_by` seconds) |
 
-Clicking the time display in the UI toggles between elapsed/total and elapsed/remaining.
+Modals are keyboard-navigable too - arrows to move, `Enter` to select, `Escape` to close, `Backspace` to go up a directory in the file browser.
+
+Clicking the time display toggles between elapsed/total and elapsed/remaining.
 
 ---
 
 ## The seat system
 
-`MAX_CLIENTS` (default 2) controls how many unique browsers can be connected at once. This isn't about page views — it's about control slots.
+`max_clients` (default 2) controls how many unique browsers can be connected at once. This isn't about page views — it's about control slots.
 
-When someone disconnects (closes the tab, loses connection), their seat isn't freed immediately. It's held for `GRACE_SECONDS` (default 30) so they can reconnect without someone else taking their spot. If they don't come back in time, the seat opens up.
+When someone disconnects (closes the tab, loses connection), their seat isn't freed immediately. It's held for `grace_seconds` (default 30) so they can reconnect without someone else taking their spot. If they don't come back in time, the seat opens up.
 
 If the server is full, new visitors see a waiting screen that polls automatically and connects them when a seat opens.
 
@@ -218,11 +196,13 @@ If the server is full, new visitors see a waiting screen that polls automaticall
 
 ## Logs
 
-While running, logs are written to:
+While running, logs are written to `log_dir` (default `/tmp`):
 
-- `/tmp/vlc-bridge.log` — bridge server output
-- `/tmp/vlc-http.log` — VLC process output (if started by vlc-control)
-- `/tmp/vlc-cloudflared.log` — tunnel output
+- `vlc-bridge.log` — bridge server events, timestamped
+- `vlc-http.log` — VLC process output (if started by vlc-control)
+- `vlc-cloudflared.log` — tunnel output
+
+The terminal log is a friendly rendering of the bridge log; the file has the full detail.
 
 ---
 
@@ -242,6 +222,7 @@ The seat limit helps prevent spam if a link gets shared wider than intended, but
 flask
 flask-sock
 requests
+tomli (Python < 3.11 only)
 ```
 
 Installed automatically into a venv by `install.sh`.

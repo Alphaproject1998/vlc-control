@@ -4,7 +4,7 @@
  * Browser UI for:
  * - seat admission / waiting room
  * - realtime VLC status via WebSocket
- * - control commands via HTTP endpoints
+ * - control commands via HTTP/WS endpoints
  */
 window.uiConfig = window.uiConfig || {
     title: "VLC Control",
@@ -70,7 +70,8 @@ window.uiConfig = window.uiConfig || {
         resumeMinSeconds: 10,
         resumeMaxPercent: 95,
         resumeTailSeconds: 300,
-        fileBrowserAsGrid: false
+        fileBrowserAsGrid: false,
+        nicknameMaxLength: 24
     }
 };
 
@@ -134,8 +135,14 @@ function applyUiConfigToDom(){
     const pageSubtitle = document.getElementById("pageSubtitle");
     const footer = document.getElementById("footerText");
     if (pageTitle && window.uiConfig.title) pageTitle.textContent = window.uiConfig.title;
-    if (pageSubtitle && window.uiConfig.subtitle) pageSubtitle.textContent = window.uiConfig.subtitle;
-    if (footer && window.uiConfig.footerText) footer.textContent = window.uiConfig.footerText;
+    if (pageSubtitle){
+        pageSubtitle.textContent = window.uiConfig.subtitle || "";
+        pageSubtitle.hidden = !window.uiConfig.subtitle;
+    }
+    if (footer){
+        footer.textContent = window.uiConfig.footerText || "";
+        footer.hidden = !window.uiConfig.footerText;
+    }
 
     if (window.uiConfig.title) document.title = String(window.uiConfig.title);
 
@@ -173,6 +180,11 @@ function applyUiConfigToDom(){
 
     const wsChip = document.getElementById("ws");
     if (wsChip) wsChip.style.display = (layout.showWSStatus === false) ? "none" : "";
+
+    const nicknameMaxLength = Number(window.uiConfig.config?.nicknameMaxLength) || 24;
+    if (clientNicknameInput) clientNicknameInput.maxLength = nicknameMaxLength;
+    const nicknameLabelHint = document.querySelector(".client-nickname-label small");
+    if (nicknameLabelHint) nicknameLabelHint.textContent = `${nicknameMaxLength} characters`;
 
     updatePlaylistCountChip();
 
@@ -368,6 +380,39 @@ async function apiPost(path, body = {}){
     return response;
 }
 
+let _cmdLock = null;
+let _optimisticSeekSec = null;
+
+function wsSend(op, params = {}) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type: "cmd", op, ...params }));
+    return true;
+}
+
+function _unlockCommand() {
+    if (!_cmdLock) return;
+    clearTimeout(_cmdLock.fallback);
+    _cmdLock = null;
+    setUiBusy(false);
+}
+
+function lockForCommand(expect, seekTarget = null) {
+    if (_cmdLock) {
+        clearTimeout(_cmdLock.fallback);
+        if (_cmdLock.expect === 'seek' && expect !== 'seek') _optimisticSeekSec = null;
+    }
+    const isSeek = expect === "seek";
+    const fallback = setTimeout(() => {
+        _cmdLock = null;
+        if (isSeek) _optimisticSeekSec = null;
+        setUiBusy(false);
+        showToast("VLC is not responding", "err");
+        console.warn("vlc cmd timeout: no confirmation received");
+    }, 2500);
+    _cmdLock = { expect, target: seekTarget, fallback };
+    setUiBusy(true, "Sending…");
+}
+
 async function refreshStatusOnce(){
     try{
         const response = await apiGet("/api/status");
@@ -426,6 +471,8 @@ const buttons = [
 
 let sid = "";
 let ws = null;
+let shutdownNotified = false;
+let lostConnectionToast = null;
 let pollTimer = null;
 
 let lastStatus = { title:"", state:"", time: 0, length: 0, progress: 0 };
@@ -558,7 +605,7 @@ function lockUI(reason, cooldownSec=0){
         titleEl.textContent = "Server full";
         setAttrIfChanged(titleEl, "title", "Server full");
         stateEl.textContent = "state: full";
-        if (clockEl) clockEl.textContent = "";
+        if (clockEl) clockEl.textContent = "0:00 / 0:00";
         document.title = "VLC Control - FULL";
         if (statusTextEl) statusTextEl.textContent = "Server full - waiting for a slot…";
         setStatusPill("err", "FULL");
@@ -567,7 +614,7 @@ function lockUI(reason, cooldownSec=0){
         titleEl.textContent = "Waiting for grace…";
         setAttrIfChanged(titleEl, "title", "Waiting for grace…");
         stateEl.textContent = `state: grace (${cooldownSec}s)`;
-        if (clockEl) clockEl.textContent = "";
+        if (clockEl) clockEl.textContent = "0:00 / 0:00";
         document.title = "VLC Control - WAITING";
         if (statusTextEl) statusTextEl.textContent = `Seat reserved - grace remaining (${cooldownSec}s)…`;
         setStatusPill("", "WAIT");
@@ -576,7 +623,7 @@ function lockUI(reason, cooldownSec=0){
         titleEl.textContent = "Waiting for a slot…";
         setAttrIfChanged(titleEl, "title", "Waiting for a slot…");
         stateEl.textContent = "state: waiting";
-        if (clockEl) clockEl.textContent = "";
+        if (clockEl) clockEl.textContent = "0:00 / 0:00";
         document.title = "VLC Control — WAITING";
         if (statusTextEl) statusTextEl.textContent = "Waiting…";
         setStatusPill("", "WAIT");
@@ -598,26 +645,50 @@ function unlockUI(){
 
 function applyStatus(status){
     const prevState = (lastStatus && lastStatus.state) || "";
+    const prevTitle = (lastStatus && lastStatus.title) || "";
     lastStatus = status || lastStatus;
     const newState = (lastStatus && lastStatus.state) || "";
+    const newTitle = (lastStatus && lastStatus.title) || "";
 
     const mediaTitle = (lastStatus.title && String(lastStatus.title).trim()) ? String(lastStatus.title).trim() : "Nothing playing";
     setText(titleEl, mediaTitle);
     setAttrIfChanged(titleEl, "title", mediaTitle);
     setText(stateEl, `state: ${lastStatus.state || "unknown"}`);
 
-    if (newState !== prevState) updatePlayPauseButtonFromState(newState);
+    if (newState !== prevState) {
+        updatePlayPauseButtonFromState(newState);
+        if (_cmdLock && _cmdLock.expect === "state") _unlockCommand();
+    }
+    if (_cmdLock && _cmdLock.expect === "title" && newTitle && newTitle !== prevTitle) {
+        _unlockCommand();
+    }
+    if (_cmdLock && _cmdLock.expect === "nav" && (newState !== prevState || (newTitle && newTitle !== prevTitle))) {
+        _unlockCommand();
+    }
+    if (_cmdLock && _cmdLock.expect === "seek") {
+        const newTime = Number(lastStatus.time || 0);
+        const t = _cmdLock.target;
+        if (t === null || Math.abs(newTime - t) <= 5) {
+            _optimisticSeekSec = null;
+            _unlockCommand();
+        }
+    }
 
     const features = window.uiConfig.features;
     if (sid && !(features && features.updateTabTitle === false)){
-        const newTitle = tabTitleFromStatus(lastStatus);
-        if (document.title !== newTitle) document.title = newTitle;
+        const tabTitle = tabTitleFromStatus(lastStatus);
+        if (document.title !== tabTitle) document.title = tabTitle;
     }
 
     renderClockFromStatus();
 
     if (!dragging && seekBarEl){
-        const p = Math.max(0, Math.min(1, Number(lastStatus.progress || 0)));
+        let displayP = Number(lastStatus.progress || 0);
+        if (_optimisticSeekSec !== null) {
+            const length = Number(lastStatus.length || 0);
+            if (length > 0) displayP = _optimisticSeekSec / length;
+        }
+        const p = Math.max(0, Math.min(1, displayP));
         const v = String(Math.round(p * 1000));
         if (seekBarEl.value !== v) seekBarEl.value = v;
     }
@@ -645,44 +716,51 @@ function setPreviewFromSlider(){
     renderClockFromStatus();
 }
 
-async function seekVal(val){
+function seekVal(val){
     if (!sid) return;
-    if (window.uiConfig.features && window.uiConfig.features.allowSeeking === false) return;
+    if (window.uiConfig.features?.allowSeeking === false) return;
+    if (_cmdLock && _cmdLock.expect === "seek") return;
 
-    setUiBusy(true, "Sending…");
-    try{
-        await apiPost("/api/seek", { val });
-    }catch(e){
-        console.error("seekVal failed", e);
-    }finally{
-        setUiBusy(false);
-    }
+    let targetSec = null;
+    const st = window.__lastStatus || {};
+    const length = Number(st.length || 0);
+    const cur = Number(st.time || 0);
+    try {
+        const s = String(val);
+        if (s.endsWith("%")) {
+            targetSec = length > 0 ? Math.round((parseFloat(s) / 100) * length) : 0;
+        } else if (s.startsWith("+") || s.startsWith("-")) {
+            targetSec = Math.max(0, cur + parseInt(s, 10));
+        } else {
+            targetSec = parseInt(s, 10);
+        }
+        if (length > 0 && targetSec !== null) targetSec = Math.max(0, Math.min(length, targetSec));
+    } catch(_e) {}
+
+    if (!wsSend("seek", { val: String(val) })) return;
+    if (targetSec !== null) _optimisticSeekSec = targetSec;
+    lockForCommand("seek", targetSec);
 }
 
-async function seekBy(deltaSeconds){
-    if (window.uiConfig.features && window.uiConfig.features.allowSeeking === false) return;
-
+function seekBy(deltaSeconds){
+    if (window.uiConfig.features?.allowSeeking === false) return;
+    if (_cmdLock && _cmdLock.expect === "seek") return;
     const status = window.__lastStatus || {};
     const currentTime = Number(status.time || 0);
     const totalLength = Number(status.length || 0);
     const jump = Number(deltaSeconds || 0);
-    const target = (totalLength > 0) ? Math.max(0, Math.min(totalLength, currentTime + jump)) : Math.max(0, currentTime + jump);
-
-    setUiBusy(true, "Sending…");
-    try{
-        await apiPost("/api/seek", { val: String(Math.floor(target)) });
-    }catch(e){
-        console.error("seekBy failed", e);
-    }finally{
-        setUiBusy(false);
-    }
+    const raw = totalLength > 0 ? Math.max(0, Math.min(totalLength, currentTime + jump)) : Math.max(0, currentTime + jump);
+    const targetSec = Math.floor(raw);
+    if (!wsSend("seek", { val: String(targetSec) })) return;
+    _optimisticSeekSec = targetSec;
+    lockForCommand("seek", targetSec);
 }
 
-async function finishSeek(commit){
+function finishSeek(commit){
     if (commit && sid){
         const p = clampZeroToOne(Number(seekBarEl.value) / 1000);
         const pct = Math.round(p * 100);
-        await seekVal(`${pct}%`);
+        seekVal(`${pct}%`);
     }
     if (seekPreviewEl) seekPreviewEl.classList.remove("show");
     dragging = false;
@@ -695,6 +773,7 @@ if (seekBarEl){
         if (!sid) return;
         const features = window.uiConfig.features;
         if (features && features.allowSeeking === false) return;
+        if (_cmdLock && _cmdLock.expect === "seek") return;
 
         dragging = true;
         const layout = window.uiConfig.layout || {};
@@ -711,16 +790,12 @@ if (seekBarEl){
     seekBarEl.addEventListener("lostpointercapture", () => { if (dragging) finishSeek(false); });
 }
 
-async function sendApiCommand(which){
+function sendApiCommand(which){
     if (!sid) return;
-    setUiBusy(true, "Sending…");
-    try{
-        await apiPost(`/api/${which}`);
-    } catch (e){
-        console.error("command failed", which, e);
-    } finally {
-        setUiBusy(false);
-    }
+    const expectMap = { toggle: "state", stop: "state", next: "nav", prev: "nav" };
+    const expect = expectMap[which] || "state";
+    if (!wsSend(which)) return;
+    lockForCommand(expect);
 }
 
 const btnToggle = document.getElementById("btnToggle");
@@ -786,7 +861,7 @@ function closePlaylist() {
 function isPlaylistOpen(){ return playlistModal && !playlistModal.hidden; }
 
 function isAnyModalOpen(){
-    return isResumeOpen() || isPlaylistOpen() || isFileBrowserOpen();
+    return isResumeOpen() || isPlaylistOpen() || isFileBrowserOpen() || isClientsOpen();
 }
 
 let __lastInputMode = "mouse";
@@ -1321,6 +1396,236 @@ resumeModal.addEventListener("click", (e) => {
     if(e.target === resumeModal) closeResumeModal("cancel");
 });
 
+const NICKNAME_PROMPTED_KEY = "vlc_control_nickname_prompted";
+const NICKNAME_KEY = "vlc_control_nickname";
+const clientsModal = document.getElementById("clientsModal");
+const clientsModalHint = document.getElementById("clientsModalHint");
+const clientRosterEl = document.getElementById("clientRoster");
+const btnClientsClose = document.getElementById("btnClientsClose");
+const clientNicknameInput = document.getElementById("clientNicknameInput");
+const btnClientNicknameSave = document.getElementById("btnClientNicknameSave");
+const clientNicknameError = document.getElementById("clientNicknameError");
+let clientRoster = [];
+const clientRosterMap = new Map();
+let clientsModalIsFirstConnect = false;
+let clientsModalPendingSave = false;
+
+let clientRosterTicker = null;
+
+function mergeClientRoster(newList){
+    const seen = new Set();
+    for (const entry of newList){
+        seen.add(entry.cid);
+        clientRosterMap.set(entry.cid, { ...entry, disconnected: false });
+    }
+    for (const [existingCid, existingEntry] of clientRosterMap){
+        if (!seen.has(existingCid) && existingEntry.reserved && !existingEntry.disconnected){
+            clientRosterMap.set(existingCid, { ...existingEntry, reserved: false, disconnected: true });
+        }
+    }
+    clientRoster = Array.from(clientRosterMap.values()).sort((a, b) => a.joined_at - b.joined_at);
+}
+
+function formatAgo(seconds){
+    seconds = Math.max(0, Math.floor(Number(seconds) || 0));
+    if (seconds < 5) return "just now";
+    if (seconds < 60) return `${seconds}s ago`;
+    const mins = Math.floor(seconds / 60);
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+}
+
+function formatClock(epochSeconds){
+    return new Date(epochSeconds * 1000).toLocaleTimeString();
+}
+
+function rosterMetaText(entry, nowSec){
+    const parts = [];
+    if (entry.disconnected){
+        parts.push("disconnected", `joined ${formatAgo(nowSec - entry.joined_at)}`);
+        if (entry.left_at != null) parts.push(`left ${formatAgo(nowSec - entry.left_at)}`);
+    } else if (entry.reserved && entry.reserved_until != null && entry.reserved_until <= nowSec){
+        parts.push("disconnected", `joined ${formatAgo(nowSec - entry.joined_at)}`);
+        if (entry.left_at != null) parts.push(`left ${formatAgo(nowSec - entry.left_at)}`);
+    } else if (entry.reserved){
+        const graceLeft = entry.reserved_until != null ? Math.max(0, Math.round(entry.reserved_until - nowSec)) : null;
+        parts.push(`reconnecting${graceLeft != null ? ` (${graceLeft}s left)` : ""}`, `joined ${formatAgo(nowSec - entry.joined_at)}`);
+    } else {
+        parts.push("connected", `joined ${formatAgo(nowSec - entry.joined_at)}`);
+    }
+    return parts.join(" · ");
+}
+
+function rosterTitleText(entry){
+    const titleLines = [`joined at ${formatClock(entry.joined_at)}`];
+    if (entry.left_at != null && (entry.reserved || entry.disconnected)){
+        titleLines.push(`left at ${formatClock(entry.left_at)}`);
+    }
+    if (entry.reserved && entry.reserved_until != null){
+        titleLines.push(`can reconnect until ${formatClock(entry.reserved_until)}`);
+    }
+    return titleLines.join("\n");
+}
+
+const clientRosterRowEls = new Map();
+
+function buildClientRosterRow(entry){
+    const li = document.createElement("li");
+    li.className = "client-roster-item";
+    li.dataset.cid = entry.cid;
+    if (entry.cid === cid) li.classList.add("is-you");
+
+    const dot = document.createElement("span");
+    dot.className = "client-roster-status-dot";
+    li.appendChild(dot);
+
+    const main = document.createElement("div");
+    main.className = "client-roster-main";
+
+    const nameRow = document.createElement("div");
+    nameRow.className = "client-roster-name";
+    const nameText = document.createElement("span");
+    nameRow.appendChild(nameText);
+    if (entry.cid === cid){
+        const youBadge = document.createElement("span");
+        youBadge.className = "client-roster-you-badge";
+        youBadge.textContent = "you";
+        nameRow.appendChild(youBadge);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "client-roster-meta";
+
+    main.appendChild(nameRow);
+    main.appendChild(meta);
+    li.appendChild(main);
+    return li;
+}
+
+function updateClientRosterRow(li, entry, nowSec){
+    const isReserved = !!(entry.reserved || entry.disconnected);
+    setClass(li, "is-reserved", isReserved);
+    const dot = li.querySelector(".client-roster-status-dot");
+    setClass(dot, "is-reserved", isReserved);
+
+    const nameText = li.querySelector(".client-roster-name span");
+    setText(nameText, entry.identity);
+
+    const meta = li.querySelector(".client-roster-meta");
+    setText(meta, rosterMetaText(entry, nowSec));
+    const title = rosterTitleText(entry);
+    if (meta.title !== title) meta.title = title;
+    clientRosterRowEls.set(entry.cid, meta);
+}
+
+function renderClientRoster(){
+    const nowSec = Date.now() / 1000;
+
+    const existing = new Map();
+    for (const li of Array.from(clientRosterEl.children)){
+        if (li.dataset && li.dataset.cid) existing.set(li.dataset.cid, li);
+    }
+
+    const seen = new Set();
+    let cursor = clientRosterEl.firstChild;
+
+    for (const entry of clientRoster){
+        seen.add(entry.cid);
+        let li = existing.get(entry.cid);
+        if (!li){
+            li = buildClientRosterRow(entry);
+            if (cursor) clientRosterEl.insertBefore(li, cursor);
+            else clientRosterEl.appendChild(li);
+            existing.set(entry.cid, li);
+        } else if (cursor !== li){
+            clientRosterEl.insertBefore(li, cursor);
+        }
+        updateClientRosterRow(li, entry, nowSec);
+        cursor = li.nextSibling;
+    }
+
+    for (const [rowCid, li] of existing){
+        if (!seen.has(rowCid)){
+            li.remove();
+            clientRosterRowEls.delete(rowCid);
+        }
+    }
+
+    if (document.activeElement !== clientNicknameInput){
+        const mine = clientRoster.find(entry => entry.cid === cid);
+        clientNicknameInput.value = (mine && mine.nickname) || "";
+    }
+}
+
+function tickClientRosterTimes(){
+    const nowSec = Date.now() / 1000;
+    for (const entry of clientRoster){
+        const meta = clientRosterRowEls.get(entry.cid);
+        if (meta) meta.textContent = rosterMetaText(entry, nowSec);
+    }
+}
+
+function startClientRosterTicker(){
+    if (clientRosterTicker) return;
+    clientRosterTicker = setInterval(() => {
+        if (isClientsOpen()) tickClientRosterTimes();
+        else stopClientRosterTicker();
+    }, 1000);
+}
+
+function stopClientRosterTicker(){
+    if (!clientRosterTicker) return;
+    clearInterval(clientRosterTicker);
+    clientRosterTicker = null;
+}
+
+function openClientsModal(showHint, nicknameTaken){
+    clientNicknameError.hidden = true;
+    clientsModalIsFirstConnect = showHint;
+    clientsModalPendingSave = false;
+    clientsModalHint.hidden = !showHint;
+    clientsModalHint.textContent = nicknameTaken
+        ? "Someone else has the nickname you last used - pick a new one."
+        : "Set a nickname so others can see who's who (optional).";
+    renderClientRoster();
+    clientsModal.hidden = false;
+    startClientRosterTicker();
+    if (isKeyboardInput()) requestAnimationFrame(() => clientNicknameInput.focus());
+}
+
+function closeClientsModal(){
+    clientsModal.hidden = true;
+    clientsModalPendingSave = false;
+    stopClientRosterTicker();
+    localStorage.setItem(NICKNAME_PROMPTED_KEY, "1");
+}
+
+function isClientsOpen(){ return clientsModal && !clientsModal.hidden; }
+
+let nicknameSavePending = false;
+let nicknameSaveValue = "";
+
+function saveClientNickname(){
+    const nickname = clientNicknameInput.value.trim();
+    clientNicknameError.hidden = true;
+    clientsModalPendingSave = clientsModalIsFirstConnect;
+    nicknameSavePending = true;
+    nicknameSaveValue = nickname;
+    wsSend("set_nickname", { nickname });
+}
+
+clientsEl.addEventListener("click", () => openClientsModal(false));
+btnClientsClose.addEventListener("click", closeClientsModal);
+btnClientNicknameSave.addEventListener("click", saveClientNickname);
+clientNicknameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter"){ e.preventDefault(); saveClientNickname(); }
+});
+clientsModal.addEventListener("click", (e) => {
+    if (e.target === clientsModal) closeClientsModal();
+});
+
 async function requestPlaylistPlay(item){
     if(!sid || !item) return;
     const features = window.uiConfig.features || {};
@@ -1328,48 +1633,33 @@ async function requestPlaylistPlay(item){
         const choice = await openResumeModal(item);
         if(choice === "cancel") return;
         if(choice === "resume"){
-            await playlistPlay(item.id, Math.floor(Number(item.progress.watched) || 0));
+            playlistPlay(item.id, Math.floor(Number(item.progress.watched) || 0));
             return;
         }
     }
-    await playlistPlay(item.id);
+    playlistPlay(item.id);
 }
 
-async function playlistPlay(id, resumeAt){
-    if(!sid) return;
-    setUiBusy(true, "Sending…");
-    try{
-        const body = { id };
-        if (Number.isFinite(resumeAt) && resumeAt > 0) body.resume_at = Math.floor(resumeAt);
-        await apiPost("/api/playlist/play", body);
-        closePlaylist();
-    }catch(e){
-        console.error("playlist play failed", e);
-    }finally{
-        setUiBusy(false);
-    }
+function playlistPlay(id, resumeAt){
+    if (!sid) return;
+    const body = { id };
+    if (Number.isFinite(resumeAt) && resumeAt > 0) body.resume_at = Math.floor(resumeAt);
+    if (!wsSend("playlist/play", body)) return;
+    closePlaylist();
+    lockForCommand("title");
 }
 
-async function playlistRemove(id){
-    if(!sid) return;
-    try{
-        await apiPost("/api/playlist/remove", { id });
-    }catch(e){
-        console.error("playlist remove failed", e);
-    }
+function playlistRemove(id){
+    if (!sid) return;
+    if (!wsSend("playlist/remove", { id })) return;
+    lockForCommand("playlist");
 }
 
-async function playlistClear() {
-    if(!sid) return;
+function playlistClear() {
+    if (!sid) return;
     if (!confirm("Clear the entire playlist?")) return;
-    setUiBusy(true, "Sending…");
-    try{
-        await apiPost("/api/playlist/clear");
-    }catch(e){
-        console.error("playlist clear failed", e);
-    }finally{
-        setUiBusy(false);
-    }
+    if (!wsSend("playlist/clear")) return;
+    lockForCommand("playlist");
 }
 
 if(btnPlaylist) btnPlaylist.addEventListener("click", openPlaylist);
@@ -1486,6 +1776,10 @@ document.addEventListener("keydown", (e) => {
             return;
         }
     }
+    if (isClientsOpen()){
+        if (trapTab(clientsModal, e)) return;
+        if (e.key === "Escape"){ e.preventDefault(); closeClientsModal(); return; }
+    }
 });
 
 const fileBrowserModal = document.getElementById("fileBrowserModal");
@@ -1537,6 +1831,7 @@ function showToast(msg, kind, ms){
     t.textContent = String(msg || "");
     toastHost.appendChild(t);
     requestAnimationFrame(() => t.classList.add("show"));
+    if (ms === Infinity) return t;
     const life = Number(ms) > 0 ? Number(ms) : 2800;
     setTimeout(() => {
         t.classList.remove("show");
@@ -1544,6 +1839,15 @@ function showToast(msg, kind, ms){
         t.addEventListener("transitionend", done, { once: true });
         setTimeout(done, 400);
     }, life);
+    return t;
+}
+
+function dismissToast(t){
+    if (!t) return;
+    t.classList.remove("show");
+    const done = () => { try { t.remove(); } catch(_e){} };
+    t.addEventListener("transitionend", done, { once: true });
+    setTimeout(done, 400);
 }
 
 let fileBrowserState = { rootId: null, rootLabel: "", path: "", entries: [], roots: [] };
@@ -2045,16 +2349,16 @@ async function fileBrowserMultiRemove(){
 
     const toRemove = [];
     for (const li of fileItems){
-        const name = li.dataset.entryName;
-        const rel = fileBrowserState.path ? `${fileBrowserState.path}/${name}` : name;
-        const matching = playlistItems.filter(it => {
-            const uri = it.uri || "";
-            return uri === rel || uri.endsWith(`/${rel}`) || uri.endsWith(`/${name}`);
-        });
+        const entry = fileBrowserState.entries.find(en => en.type === "file" && en.name === li.dataset.entryName);
+        if (!entry) continue;
+        const matching = playlistItems.filter(it =>
+            (entry.uri && it.uri === entry.uri) ||
+            (entry.playlistId && String(it.id) === String(entry.playlistId))
+        );
         for (const item of matching) {
             toRemove.push({
                 id: String(item.id),
-                name: item.name || item.uri || name,
+                name: item.name || item.uri || entry.name,
                 key: li.dataset.key
             });
         }
@@ -2327,7 +2631,7 @@ function startPolling(){
                 if (data.clients >= data.max) lockUI("full", cd);
                 else if (cd > 0) lockUI("cooldown", cd);
                 else lockUI("waiting", 0);
-                if (ws){ try{ ws.close(); }catch{} ws = null; }
+                if (ws){ shutdownNotified = true; try{ ws.close(); }catch{} ws = null; }
             }
         }
 
@@ -2338,18 +2642,34 @@ function startPolling(){
     tick();
 }
 
+document.addEventListener("visibilitychange", () => {
+    if (document.hidden){
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "visibility", state: "hidden" }));
+        return;
+    }
+    if (ws && ws.readyState === WebSocket.OPEN){
+        ws.send(JSON.stringify({ type: "visibility", state: "visible" }));
+        return;
+    }
+    if (!ws) connectWS();
+});
+
 function connectWS(){
     if (sid) return;
     if (ws) return;
 
     const proto = (location.protocol === "https:") ? "wss" : "ws";
-    const url = `${proto}://${location.host}/ws?t=${encodeURIComponent(token)}&cid=${encodeURIComponent(cid)}`;
+    const storedNickname = localStorage.getItem(NICKNAME_KEY) || "";
+    const url = `${proto}://${location.host}/ws?t=${encodeURIComponent(token)}&cid=${encodeURIComponent(cid)}`
+        + (storedNickname ? `&nickname=${encodeURIComponent(storedNickname)}` : "");
     ws = new WebSocket(url);
 
     ws.onopen = () => { if (wsEl) wsEl.textContent = "ws: connected"; };
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
         ws = null;
+        if (!shutdownNotified && ev.code !== 1001 && !document.hidden) lostConnectionToast = showToast("Connection to host lost", "err", Infinity);
+        shutdownNotified = false;
         if (sid){
             sid = "";
             lockUI("waiting");
@@ -2368,10 +2688,57 @@ function connectWS(){
             if (msg.type === "clients"){
                 const d = msg.data || {};
                 if (clientsEl) clientsEl.textContent = `clients: ${d.clients}/${d.max}`;
+                if (Array.isArray(d.list)){
+                    mergeClientRoster(d.list);
+                    if (isClientsOpen()) renderClientRoster();
+                }
+            }
+
+            if (msg.type === "nickname_ok"){
+                nicknameSavePending = false;
+                localStorage.setItem(NICKNAME_KEY, nicknameSaveValue);
+                if (clientsModalPendingSave && isClientsOpen()) closeClientsModal();
+            }
+
+            if (msg.type === "cmd_error"){
+                if (msg.op === "set_nickname"){
+                    clientsModalPendingSave = false;
+                    nicknameSavePending = false;
+                    const friendly = msg.message === "nickname taken" ? "That nickname is already taken" : "Something went wrong";
+                    clientNicknameError.textContent = friendly;
+                    clientNicknameError.hidden = false;
+                    return;
+                }
+                if (_cmdLock) {
+                    if (_cmdLock.expect === "seek") _optimisticSeekSec = null;
+                    _unlockCommand();
+                }
+                const knownErrors = {
+                    "seeking not allowed": "Seeking is disabled",
+                    "playlist control not allowed": "Playlist control is disabled",
+                    "id required": "Something went wrong",
+                    "val required": "Something went wrong",
+                    "unknown op": "Something went wrong",
+                };
+                const friendly = knownErrors[msg.message] ?? "VLC is not responding";
+                showToast(friendly, "err");
+                console.warn("cmd_error", msg);
+                return;
+            }
+
+            if (msg.type === "shutdown"){
+                const reasons = {
+                    stopped: "Host stopped the session",
+                    crashed: "Host crashed unexpectedly",
+                };
+                shutdownNotified = true;
+                showToast(reasons[msg.reason] || "Host disconnected", "err", Infinity);
+                return;
             }
 
             if (msg.type === "error"){
                 lockUI("full");
+                shutdownNotified = true;
                 try{ ws.close(); }catch{}
                 ws = null;
                 startPolling();
@@ -2381,9 +2748,16 @@ function connectWS(){
             if (msg.type === "auth" && msg.sid){
                 sid = msg.sid;
                 window.__sid = sid;
+                if (lostConnectionToast){
+                    dismissToast(lostConnectionToast);
+                    lostConnectionToast = null;
+                    showToast("Connection restored", "ok");
+                }
                 stopPolling();
                 unlockUI();
                 refreshStatusOnce();
+                if (msg.nickname_conflict) openClientsModal(true, true);
+                else if (!localStorage.getItem(NICKNAME_PROMPTED_KEY)) openClientsModal(true);
                 return;
             }
 
@@ -2395,6 +2769,7 @@ function connectWS(){
             if (msg.type === "playlist"){
                 playlistItems = Array.isArray(msg.data) ? msg.data : [];
                 window.__playlist = playlistItems;
+                if (_cmdLock && _cmdLock.expect === "playlist") _unlockCommand();
                 renderPlaylist();
                 if (isFileBrowserOpen() && fileBrowserState.rootId){
                     reconcileFileBrowserEntriesFromPlaylist();
@@ -2473,8 +2848,7 @@ function setupKeyboardShortcuts(){
 }
 
 lockUI("waiting");
-fetchClients();
-startPolling();
+if (token) startPolling();
 
 (async function bootstrap(){
     const loaderText = document.getElementById("loaderText");
