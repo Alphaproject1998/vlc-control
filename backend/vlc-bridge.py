@@ -69,8 +69,6 @@ def _tail_format(line: str) -> str | None:
             return out("+", f"{identity} reconnected")
         return out("+", f"{identity} joined")
     if etype == "client_leave":
-        if reason == "backgrounded":
-            return out("-", f"{identity} left (tab backgrounded)")
         return out("-", f"{identity} left")
     if etype == "client_reject":
         return out("!", f"{identity} was rejected - server full ({kv.get('clients', '?')}/{kv.get('max', '?')})")
@@ -368,6 +366,12 @@ def _client_identity(cid: str) -> str:
         return _client_identity_locked(cid)
 
 
+def _log_client_leave(cid: str) -> None:
+    with _lock:
+        identity = _client_identity_locked(cid)
+    log_event("client_leave", cid=cid, identity=identity, reserved_for=int(GRACE_SECONDS))
+
+
 def _client_roster_locked() -> list[dict]:
     now = _now()
     cids = sorted(
@@ -482,6 +486,7 @@ def broadcast_clients() -> None:
     if not dead:
         return
 
+    left_cids = []
     with _lock:
         for cid, ws_set in list(_active.items()):
             for w in list(ws_set):
@@ -490,9 +495,10 @@ def broadcast_clients() -> None:
             if len(ws_set) == 0:
                 _active.pop(cid, None)
                 _reserved[cid] = _now() + GRACE_SECONDS
-                backgrounded = _client_meta.get(cid, {}).pop("backgrounded", False)
-                log_event("client_leave", cid=cid, identity=_client_identity_locked(cid),
-                          reserved_for=int(GRACE_SECONDS), reason=("backgrounded" if backgrounded else "disconnected"))
+                left_cids.append(cid)
+
+    for cid in left_cids:
+        _log_client_leave(cid)
 
     with _sessions_lock:
         for sid, (w, _) in list(_sessions.items()):
@@ -1484,14 +1490,10 @@ def ws_route(ws):
                 data = json.loads(msg)
             except (json.JSONDecodeError, TypeError):
                 continue
-            if data.get("type") == "visibility":
-                with _lock:
-                    meta = _ensure_client_meta_locked(cid)
-                    meta["backgrounded"] = (data.get("state") == "hidden")
-                continue
             if data.get("type") == "cmd":
                 _dispatch_ws_cmd(ws, cid, data)
     finally:
+        left = False
         with _lock:
             ws_set = _active.get(cid)
             if ws_set:
@@ -1499,9 +1501,10 @@ def ws_route(ws):
                 if len(ws_set) == 0:
                     _active.pop(cid, None)
                     _reserved[cid] = _now() + GRACE_SECONDS
-                    backgrounded = _client_meta.get(cid, {}).pop("backgrounded", False)
-                    log_event("client_leave", cid=cid, identity=_client_identity_locked(cid),
-                              reserved_for=int(GRACE_SECONDS), reason=("backgrounded" if backgrounded else "disconnected"))
+                    left = True
+
+        if left:
+            _log_client_leave(cid)
 
         with _sessions_lock:
             _sessions.pop(sid, None)

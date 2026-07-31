@@ -2643,14 +2643,9 @@ function startPolling(){
 }
 
 document.addEventListener("visibilitychange", () => {
-    if (document.hidden){
-        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "visibility", state: "hidden" }));
-        return;
-    }
-    if (ws && ws.readyState === WebSocket.OPEN){
-        ws.send(JSON.stringify({ type: "visibility", state: "visible" }));
-        return;
-    }
+    if (document.hidden) return;
+    // backgrounded tabs can have their socket die silently (mobile OS suspension) without onclose firing
+    if (ws && ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING) ws = null;
     if (!ws) connectWS();
 });
 
