@@ -44,6 +44,12 @@ cloudflare = "auto"
 # Directory for log and PID files
 log_dir = "/tmp"
 
+# Keep logging host actions while nobody is connected.
+# false (default) - VLC is only polled while at least one client is on, so host activity
+#                   between sessions goes unlogged
+# true            - poll and log all the time, at the cost of a constant 750ms VLC poll
+log_when_idle = false
+
 # How to identify a client in logs/console when they haven't set a nickname.
 # numeric - join order, C1/C2/... (default) | cid - full client id | short_cid - first 6 chars | ip - remote address
 client_id_style = "numeric"
@@ -151,6 +157,9 @@ show_state = true           # "state: playing / paused" chip
 show_clock = true           # elapsed / remaining time chip
 show_clients = true         # "clients: x/y" chip
 show_ws_status = true       # WebSocket connection status chip
+
+# The "Waiting… / OK" line under the buttons
+show_quick_status_bar = true
 
 # Main playback control buttons grid
 show_buttons = true

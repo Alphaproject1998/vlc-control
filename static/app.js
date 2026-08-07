@@ -20,7 +20,7 @@ window.uiConfig = window.uiConfig || {
         showState: true,
         showClock: true,
         showClients: true,
-        showWSStatus: true,
+        showWsStatus: true,
         showButtons: true,
         showIcons: true,
         showSystemStatus: true,
@@ -179,7 +179,7 @@ function applyUiConfigToDom(){
     if (clientsChip) clientsChip.style.display = (layout.showClients === false) ? "none" : "";
 
     const wsChip = document.getElementById("ws");
-    if (wsChip) wsChip.style.display = (layout.showWSStatus === false) ? "none" : "";
+    if (wsChip) wsChip.style.display = (layout.showWsStatus === false) ? "none" : "";
 
     const nicknameMaxLength = Number(window.uiConfig.config?.nicknameMaxLength) || 24;
     if (clientNicknameInput) clientNicknameInput.maxLength = nicknameMaxLength;
@@ -301,6 +301,43 @@ function showAppAndHideLoader(){
     if (loader) loader.style.display = "none";
 }
 
+const MODAL_BODY_IDS = ["playlistModalBody", "fileBrowserModalBody"];
+
+function setModalLoading(bodyEl, label){
+    if (!bodyEl) return;
+    let overlay = bodyEl.querySelector(".modal-loader");
+    if (!label){
+        if (overlay) overlay.remove();
+        return;
+    }
+    if (!overlay){
+        overlay = document.createElement("div");
+        overlay.className = "modal-loader";
+        const spinner = document.createElement("div");
+        spinner.className = "spinner";
+        const textEl = document.createElement("div");
+        textEl.className = "modal-loader-text";
+        overlay.appendChild(spinner);
+        overlay.appendChild(textEl);
+        bodyEl.appendChild(overlay);
+    }
+    const textEl = overlay.querySelector(".modal-loader-text");
+    if (textEl.textContent !== label) textEl.textContent = label;
+}
+
+function clearModalLoading(){
+    for (const id of MODAL_BODY_IDS){
+        const overlay = document.querySelector(`#${id} .modal-loader`);
+        if (overlay) overlay.remove();
+    }
+}
+
+function topmostModalBody(){
+    if (isFileBrowserOpen()) return document.getElementById("fileBrowserModalBody");
+    if (isPlaylistOpen()) return document.getElementById("playlistModalBody");
+    return null;
+}
+
 function setUiBusy(on, label){
     const ids = ["btnToggle","btnStop","btnPrev","btnNext","btnBack","btnFwd","seekBar"];
     for (const id of ids){
@@ -309,7 +346,7 @@ function setUiBusy(on, label){
         el.disabled = !!on;
     }
 
-    document.querySelectorAll(".modal button").forEach(btn => { btn.disabled = !!on; });
+    document.querySelectorAll(".modal button:not([aria-label='Close'])").forEach(btn => { btn.disabled = !!on; });
     const playlistModalEl = document.getElementById("playlistModal");
     if (playlistModalEl) playlistModalEl.classList.toggle("busy", !!on);
     const fileBrowserModalEl = document.getElementById("fileBrowserModal");
@@ -317,6 +354,9 @@ function setUiBusy(on, label){
 
     const statusTextEl = document.getElementById("statusText");
     const statusPillEl = document.getElementById("statusPill");
+
+    if (on) setModalLoading(topmostModalBody(), label || "Working…");
+    else clearModalLoading();
 
     if (on){
         if (statusTextEl && statusTextEl.dataset.prevText === undefined) statusTextEl.dataset.prevText = statusTextEl.textContent || "";
@@ -396,7 +436,7 @@ function _unlockCommand() {
     setUiBusy(false);
 }
 
-function lockForCommand(expect, seekTarget = null) {
+function lockForCommand(expect, seekTarget = null, label = "Sending…") {
     if (_cmdLock) {
         clearTimeout(_cmdLock.fallback);
         if (_cmdLock.expect === 'seek' && expect !== 'seek') _optimisticSeekSec = null;
@@ -410,7 +450,7 @@ function lockForCommand(expect, seekTarget = null) {
         console.warn("vlc cmd timeout: no confirmation received");
     }, 2500);
     _cmdLock = { expect, target: seekTarget, fallback };
-    setUiBusy(true, "Sending…");
+    setUiBusy(true, label);
 }
 
 async function refreshStatusOnce(){
@@ -589,6 +629,7 @@ function lockUI(reason, cooldownSec=0){
 
     closePlaylist();
     closeFileBrowser();
+    clearModalLoading();
     const playlistModalEl = document.getElementById("playlistModal");
     if (playlistModalEl) playlistModalEl.classList.add("busy");
     const fileBrowserModalEl = document.getElementById("fileBrowserModal");
@@ -817,6 +858,7 @@ if (btnFwd)  btnFwd.addEventListener("click", () => seekBy(getSeekJumpBy()));
 //TODO: Improve modal display, fade/animation?
 //TODO: Global modal handler.
 let playlistItems = [];
+let playlistLoaded = false;
 const playlistModal = document.getElementById("playlistModal");
 const playlistItemsEl = document.getElementById("playlistItems");
 const playlistEmptyEl = document.getElementById("playlistEmpty");
@@ -851,6 +893,8 @@ function updatePlaylistCountChip(){
 function openPlaylist() {
     if(!playlistModal) return;
     playlistModal.hidden = false;
+    if (_cmdLock) setModalLoading(document.getElementById("playlistModalBody"), "Working…");
+    else if (!playlistLoaded) setModalLoading(document.getElementById("playlistModalBody"), "Loading playlist…");
     if (isKeyboardInput()) requestAnimationFrame(() => focusFirstPlaylistItem());
 }
 function closePlaylist() {
@@ -1258,7 +1302,9 @@ async function playlistMultiRemove(){
     }
 
     const failed = [];
+    let done = 0;
     for (const id of selectedIds){
+        setUiBusy(true, `Removing ${done + 1} of ${selectedIds.length}…`);
         try{
             await apiPost("/api/playlist/remove", { id });
             playlistSelected.delete(id);
@@ -1266,7 +1312,9 @@ async function playlistMultiRemove(){
             const item = playlistItems.find(it => String(it.id) === id);
             failed.push(item ? (item.name || item.uri || id) : id);
         }
+        done++;
     }
+    setUiBusy(false);
 
     if (failed.length) showToast(`Failed to remove: ${failed.join(", ")}`, "err");
     if (playlistWithSelectedEl) playlistWithSelectedEl.value = "";
@@ -1610,10 +1658,14 @@ let nicknameSaveValue = "";
 function saveClientNickname(){
     const nickname = clientNicknameInput.value.trim();
     clientNicknameError.hidden = true;
+    if (!wsSend("set_nickname", { nickname })){
+        clientNicknameError.textContent = "Not connected to the host";
+        clientNicknameError.hidden = false;
+        return;
+    }
     clientsModalPendingSave = clientsModalIsFirstConnect;
     nicknameSavePending = true;
     nicknameSaveValue = nickname;
-    wsSend("set_nickname", { nickname });
 }
 
 clientsEl.addEventListener("click", () => openClientsModal(false));
@@ -1652,14 +1704,14 @@ function playlistPlay(id, resumeAt){
 function playlistRemove(id){
     if (!sid) return;
     if (!wsSend("playlist/remove", { id })) return;
-    lockForCommand("playlist");
+    lockForCommand("playlist", null, "Removing…");
 }
 
 function playlistClear() {
     if (!sid) return;
     if (!confirm("Clear the entire playlist?")) return;
     if (!wsSend("playlist/clear")) return;
-    lockForCommand("playlist");
+    lockForCommand("playlist", null, "Clearing playlist…");
 }
 
 if(btnPlaylist) btnPlaylist.addEventListener("click", openPlaylist);
@@ -1859,6 +1911,7 @@ function openFileBrowser(){
     fileBrowserState = { rootId: null, rootLabel: "", path: "", entries: [], roots: [] };
     if (fileBrowserSearchEl) fileBrowserSearchEl.value = "";
     applyFileBrowserViewMode();
+    if (_cmdLock) setFileBrowserLoading("Working…");
     loadFileBrowserRoots();
     if (isKeyboardInput()) requestAnimationFrame(() => { if (fileBrowserSearchEl) fileBrowserSearchEl.focus(); });
 }
@@ -1901,9 +1954,13 @@ function formatFileSize(n){
     return `${v.toFixed(v < 10 ? 1 : 0)} ${u[i]}`;
 }
 
-//TODO: make a page loader & disable while transitioning
+function setFileBrowserLoading(label){
+    setModalLoading(document.getElementById("fileBrowserModalBody"), label);
+}
+
 async function loadFileBrowserRoots(){
     if (!sid) return;
+    setFileBrowserLoading("Loading…");
     try{
         const response = await apiGet("/api/files/roots");
         const data = await response.json();
@@ -1921,6 +1978,9 @@ async function loadFileBrowserRoots(){
         console.error("roots load failed", e);
         fileBrowserState.entries = [];
         renderFileBrowser();
+        showToast("Could not load folders", "err");
+    }finally{
+        setFileBrowserLoading(null);
     }
 }
 
@@ -1953,6 +2013,7 @@ function reconcileFileBrowserEntriesFromPlaylist(){
 
 async function loadFileBrowserDirectory(rootId, path){
     if (!sid) return;
+    setFileBrowserLoading("Loading…");
     try{
         const response = await apiGet(`/api/files?root=${encodeURIComponent(rootId)}&path=${encodeURIComponent(path || "")}`);
         const data = await response.json();
@@ -1964,6 +2025,9 @@ async function loadFileBrowserDirectory(rootId, path){
         renderFileBrowser();
     }catch(e){
         console.error("dir load failed", e);
+        showToast("Could not open that folder", "err");
+    }finally{
+        setFileBrowserLoading(null);
     }
 }
 
@@ -2231,10 +2295,10 @@ function updateFileBrowserGroupHeaders(){
     const headers = fileBrowserItemsEl.querySelectorAll("li[data-type='group-header']");
     for (const header of headers){
         const items = [];
-        let sib = header.nextSibling;
+        let sib = header.nextElementSibling;
         while (sib && sib.dataset.type !== "group-header"){
-            if (sib.dataset && sib.dataset.type === "file") items.push(sib);
-            sib = sib.nextSibling;
+            if (sib.dataset.type === "file") items.push(sib);
+            sib = sib.nextElementSibling;
         }
         const keys = items.map(el => el.dataset.key);
         const allSelected = keys.length > 0 && keys.every(k => fileBrowserSelected.has(k));
@@ -2281,10 +2345,10 @@ function toggleFileBrowserItem(key){
 function toggleFileBrowserGroup(headerLi){
     if (!fileBrowserMultiActive || !fileBrowserItemsEl) return;
     const items = [];
-    let sib = headerLi.nextSibling;
-    while (sib && (!sib.dataset || sib.dataset.type !== "group-header")){
-        if (sib.dataset && sib.dataset.type === "file") items.push(sib);
-        sib = sib.nextSibling;
+    let sib = headerLi.nextElementSibling;
+    while (sib && sib.dataset.type !== "group-header"){
+        if (sib.dataset.type === "file") items.push(sib);
+        sib = sib.nextElementSibling;
     }
     const keys = items.map(el => el.dataset.key);
     const allSelected = keys.length > 0 && keys.every(k => fileBrowserSelected.has(k));
@@ -2319,8 +2383,10 @@ async function fileBrowserMultiAdd(){
     if (!fileItems.length) return;
 
     const failed = [];
+    let done = 0;
     for (const li of fileItems){
         const name = li.dataset.entryName;
+        setUiBusy(true, `Adding ${done + 1} of ${fileItems.length}…`);
         try{
             const rel = fileBrowserChildPath(name);
             await apiPost("/api/files/add", { root: fileBrowserState.rootId, path: rel });
@@ -2329,7 +2395,9 @@ async function fileBrowserMultiAdd(){
         }catch(e){
             failed.push(name);
         }
+        done++;
     }
+    setUiBusy(false);
 
     const added = fileItems.length - failed.length;
     if (added > 0) showToast(`Added ${added} file${added !== 1 ? "s" : ""}`, "ok");
@@ -2377,14 +2445,18 @@ async function fileBrowserMultiRemove(){
 
     const failed = [];
     const successKeys = new Set();
+    let done = 0;
     for (const item of toRemove){
+        setUiBusy(true, `Removing ${done + 1} of ${toRemove.length}…`);
         try{
             await apiPost("/api/playlist/remove", { id: item.id });
             successKeys.add(item.key);
         }catch(e){
             failed.push(item.name);
         }
+        done++;
     }
+    setUiBusy(false);
 
     for (const key of successKeys){
         fileBrowserSelected.delete(key);
@@ -2692,6 +2764,7 @@ function connectWS(){
             if (msg.type === "nickname_ok"){
                 nicknameSavePending = false;
                 localStorage.setItem(NICKNAME_KEY, nicknameSaveValue);
+                showToast(nicknameSaveValue ? `Nickname set: ${nicknameSaveValue}` : "Nickname cleared", "ok");
                 if (clientsModalPendingSave && isClientsOpen()) closeClientsModal();
             }
 
@@ -2764,6 +2837,10 @@ function connectWS(){
             if (msg.type === "playlist"){
                 playlistItems = Array.isArray(msg.data) ? msg.data : [];
                 window.__playlist = playlistItems;
+                if (!playlistLoaded){
+                    playlistLoaded = true;
+                    if (!_cmdLock) setModalLoading(document.getElementById("playlistModalBody"), null);
+                }
                 if (_cmdLock && _cmdLock.expect === "playlist") _unlockCommand();
                 renderPlaylist();
                 if (isFileBrowserOpen() && fileBrowserState.rootId){

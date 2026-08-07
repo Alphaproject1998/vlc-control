@@ -306,6 +306,7 @@ SCHEMA = {
     ("system", "kill_vlc_on_exit"): ("bool",),
     ("system", "cloudflare"): ("enum", ["auto", "on", "off"]),
     ("system", "log_dir"): ("writable_dir",),
+    ("system", "log_when_idle"): ("bool",),
     ("system", "client_id_style"): ("enum", ["numeric", "cid", "short_cid", "ip"]),
     ("system", "action_debounce_ms"): ("int_min", 0),
     ("file_browse", "enabled"): ("bool",),

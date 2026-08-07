@@ -482,6 +482,28 @@ button.playlist-indicator:hover {
     border-color: rgba(239,68,68,.35);
 }
 
+.modal-loader {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    background: rgba(0,0,0,.45);
+    backdrop-filter: blur(1px);
+}
+.modal-loader .spinner {
+    width: 26px;
+    height: 26px;
+    border-width: 3px;
+}
+.modal-loader-text {
+    color: var(--text);
+    font-size: 13px;
+}
+
 .modal-overlay.busy .playlist-item {
     pointer-events: none;
     opacity: .55;

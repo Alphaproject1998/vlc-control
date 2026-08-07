@@ -130,6 +130,8 @@ VLC_PASS = str(_SYS.get("vlc_pass", os.environ.get("VLC_PASS", "")))
 MAX_CLIENTS = int(os.environ.get("MAX_CLIENTS") or _SYS.get("max_clients", 2))
 GRACE_SECONDS = float(os.environ.get("GRACE_SECONDS") or _SYS.get("grace_seconds", 30))
 
+LOG_WHEN_IDLE: bool = bool(_SYS.get("log_when_idle", False))
+
 CLIENT_ID_STYLE = str(_SYS.get("client_id_style", "numeric")).strip().lower()
 ACTION_DEBOUNCE_MS = int(_SYS.get("action_debounce_ms", 250))
 NICKNAME_MAX_LENGTH = int(_SYS.get("nickname_max_length", 24))
@@ -682,7 +684,9 @@ def broadcaster_loop() -> None:
             for ws_set in _active.values():
                 all_ws.extend(list(ws_set))
 
-        if not all_ws:
+        if not all_ws and not LOG_WHEN_IDLE:
+            _last_seen = None
+            _last_seen_wall_time = None
             continue
 
         status: dict | None = None
