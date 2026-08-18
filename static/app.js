@@ -20,11 +20,12 @@ window.uiConfig = window.uiConfig || {
         showState: true,
         showClock: true,
         showClients: true,
-        showWSStatus: true,
+        showWsStatus: true,
         showButtons: true,
         showIcons: true,
         showSystemStatus: true,
         showFooter: true,
+        showVersion: true,
         showPlaylist: true,
         showPlaylistPrevNext: true,
         showPlaylistProgressEntries: true,
@@ -144,6 +145,13 @@ function applyUiConfigToDom(){
         footer.hidden = !window.uiConfig.footerText;
     }
 
+    const versionEl = document.getElementById("appVersion");
+    if (versionEl){
+        const version = window.uiConfig.version || "";
+        versionEl.textContent = version ? `v${version}` : "";
+        versionEl.hidden = !version || layout.showVersion === false;
+    }
+
     if (window.uiConfig.title) document.title = String(window.uiConfig.title);
 
     const header = document.querySelector("main header");
@@ -179,7 +187,7 @@ function applyUiConfigToDom(){
     if (clientsChip) clientsChip.style.display = (layout.showClients === false) ? "none" : "";
 
     const wsChip = document.getElementById("ws");
-    if (wsChip) wsChip.style.display = (layout.showWSStatus === false) ? "none" : "";
+    if (wsChip) wsChip.style.display = (layout.showWsStatus === false) ? "none" : "";
 
     const nicknameMaxLength = Number(window.uiConfig.config?.nicknameMaxLength) || 24;
     if (clientNicknameInput) clientNicknameInput.maxLength = nicknameMaxLength;
@@ -301,6 +309,43 @@ function showAppAndHideLoader(){
     if (loader) loader.style.display = "none";
 }
 
+const MODAL_BODY_IDS = ["playlistModalBody", "fileBrowserModalBody"];
+
+function setModalLoading(bodyEl, label){
+    if (!bodyEl) return;
+    let overlay = bodyEl.querySelector(".modal-loader");
+    if (!label){
+        if (overlay) overlay.remove();
+        return;
+    }
+    if (!overlay){
+        overlay = document.createElement("div");
+        overlay.className = "modal-loader";
+        const spinner = document.createElement("div");
+        spinner.className = "spinner";
+        const textEl = document.createElement("div");
+        textEl.className = "modal-loader-text";
+        overlay.appendChild(spinner);
+        overlay.appendChild(textEl);
+        bodyEl.appendChild(overlay);
+    }
+    const textEl = overlay.querySelector(".modal-loader-text");
+    if (textEl.textContent !== label) textEl.textContent = label;
+}
+
+function clearModalLoading(){
+    for (const id of MODAL_BODY_IDS){
+        const overlay = document.querySelector(`#${id} .modal-loader`);
+        if (overlay) overlay.remove();
+    }
+}
+
+function topmostModalBody(){
+    if (isFileBrowserOpen()) return document.getElementById("fileBrowserModalBody");
+    if (isPlaylistOpen()) return document.getElementById("playlistModalBody");
+    return null;
+}
+
 function setUiBusy(on, label){
     const ids = ["btnToggle","btnStop","btnPrev","btnNext","btnBack","btnFwd","seekBar"];
     for (const id of ids){
@@ -309,7 +354,7 @@ function setUiBusy(on, label){
         el.disabled = !!on;
     }
 
-    document.querySelectorAll(".modal button").forEach(btn => { btn.disabled = !!on; });
+    document.querySelectorAll(".modal button:not([aria-label='Close'])").forEach(btn => { btn.disabled = !!on; });
     const playlistModalEl = document.getElementById("playlistModal");
     if (playlistModalEl) playlistModalEl.classList.toggle("busy", !!on);
     const fileBrowserModalEl = document.getElementById("fileBrowserModal");
@@ -317,6 +362,9 @@ function setUiBusy(on, label){
 
     const statusTextEl = document.getElementById("statusText");
     const statusPillEl = document.getElementById("statusPill");
+
+    if (on) setModalLoading(topmostModalBody(), label || "Working…");
+    else clearModalLoading();
 
     if (on){
         if (statusTextEl && statusTextEl.dataset.prevText === undefined) statusTextEl.dataset.prevText = statusTextEl.textContent || "";
@@ -396,7 +444,7 @@ function _unlockCommand() {
     setUiBusy(false);
 }
 
-function lockForCommand(expect, seekTarget = null) {
+function lockForCommand(expect, seekTarget = null, label = "Sending…") {
     if (_cmdLock) {
         clearTimeout(_cmdLock.fallback);
         if (_cmdLock.expect === 'seek' && expect !== 'seek') _optimisticSeekSec = null;
@@ -410,7 +458,7 @@ function lockForCommand(expect, seekTarget = null) {
         console.warn("vlc cmd timeout: no confirmation received");
     }, 2500);
     _cmdLock = { expect, target: seekTarget, fallback };
-    setUiBusy(true, "Sending…");
+    setUiBusy(true, label);
 }
 
 async function refreshStatusOnce(){
@@ -589,6 +637,7 @@ function lockUI(reason, cooldownSec=0){
 
     closePlaylist();
     closeFileBrowser();
+    clearModalLoading();
     const playlistModalEl = document.getElementById("playlistModal");
     if (playlistModalEl) playlistModalEl.classList.add("busy");
     const fileBrowserModalEl = document.getElementById("fileBrowserModal");
@@ -601,28 +650,28 @@ function lockUI(reason, cooldownSec=0){
     if (!wsEl || !titleEl || !stateEl) return;
 
     if (reason === "full"){
-        wsEl.textContent = "ws: waiting";
-        titleEl.textContent = "Server full";
-        setAttrIfChanged(titleEl, "title", "Server full");
-        stateEl.textContent = "state: full";
+        wsEl.textContent = "Not connected";
+        titleEl.textContent = "All seats taken";
+        setAttrIfChanged(titleEl, "title", "All seats taken");
+        stateEl.textContent = "All seats taken";
         if (clockEl) clockEl.textContent = "0:00 / 0:00";
-        document.title = "VLC Control - FULL";
-        if (statusTextEl) statusTextEl.textContent = "Server full - waiting for a slot…";
+        document.title = "VLC Control — FULL";
+        if (statusTextEl) statusTextEl.textContent = "All seats taken, waiting for one to free up…";
         setStatusPill("err", "FULL");
     } else if (reason === "cooldown"){
-        wsEl.textContent = "ws: waiting";
+        wsEl.textContent = "Not connected";
         titleEl.textContent = "Waiting for grace…";
         setAttrIfChanged(titleEl, "title", "Waiting for grace…");
-        stateEl.textContent = `state: grace (${cooldownSec}s)`;
+        stateEl.textContent = `Seat held (${cooldownSec}s)`;
         if (clockEl) clockEl.textContent = "0:00 / 0:00";
-        document.title = "VLC Control - WAITING";
-        if (statusTextEl) statusTextEl.textContent = `Seat reserved - grace remaining (${cooldownSec}s)…`;
+        document.title = "VLC Control — WAITING";
+        if (statusTextEl) statusTextEl.textContent = `Your seat is being held (${cooldownSec}s)…`;
         setStatusPill("", "WAIT");
     } else {
-        wsEl.textContent = "ws: waiting";
-        titleEl.textContent = "Waiting for a slot…";
-        setAttrIfChanged(titleEl, "title", "Waiting for a slot…");
-        stateEl.textContent = "state: waiting";
+        wsEl.textContent = "Not connected";
+        titleEl.textContent = "Waiting for a seat…";
+        setAttrIfChanged(titleEl, "title", "Waiting for a seat…");
+        stateEl.textContent = "Waiting for a seat";
         if (clockEl) clockEl.textContent = "0:00 / 0:00";
         document.title = "VLC Control — WAITING";
         if (statusTextEl) statusTextEl.textContent = "Waiting…";
@@ -633,9 +682,9 @@ function lockUI(reason, cooldownSec=0){
 function unlockUI(){
     setControlsBusy(false);
     if (seekBarEl) seekBarEl.disabled = false;
-    if (statusTextEl) statusTextEl.textContent = "Admitted";
+    if (statusTextEl) statusTextEl.textContent = "Connected";
     setStatusPill("ok", "OK");
-    if (wsEl) wsEl.textContent = "ws: connected";
+    if (wsEl) wsEl.textContent = "Connected";
     const playlistModalEl = document.getElementById("playlistModal");
     if (playlistModalEl) playlistModalEl.classList.remove("busy");
     const fileBrowserModalEl = document.getElementById("fileBrowserModal");
@@ -653,7 +702,8 @@ function applyStatus(status){
     const mediaTitle = (lastStatus.title && String(lastStatus.title).trim()) ? String(lastStatus.title).trim() : "Nothing playing";
     setText(titleEl, mediaTitle);
     setAttrIfChanged(titleEl, "title", mediaTitle);
-    setText(stateEl, `state: ${lastStatus.state || "unknown"}`);
+    const playbackState = lastStatus.state || "unknown";
+    setText(stateEl, playbackState.charAt(0).toUpperCase() + playbackState.slice(1));
 
     if (newState !== prevState) {
         updatePlayPauseButtonFromState(newState);
@@ -817,6 +867,7 @@ if (btnFwd)  btnFwd.addEventListener("click", () => seekBy(getSeekJumpBy()));
 //TODO: Improve modal display, fade/animation?
 //TODO: Global modal handler.
 let playlistItems = [];
+let playlistLoaded = false;
 const playlistModal = document.getElementById("playlistModal");
 const playlistItemsEl = document.getElementById("playlistItems");
 const playlistEmptyEl = document.getElementById("playlistEmpty");
@@ -844,13 +895,15 @@ function updatePlaylistCountChip(){
     const count = playlistItems.length;
     const countStr = String(count);
     if (playlistCountChip.textContent !== countStr) playlistCountChip.textContent = countStr;
-    const title = `${count} in playlist`;
+    const title = `${count} item${count !== 1 ? "s" : ""} in the playlist`;
     if (playlistCountChip.title !== title) playlistCountChip.title = title;
 }
 
 function openPlaylist() {
     if(!playlistModal) return;
     playlistModal.hidden = false;
+    if (_cmdLock) setModalLoading(document.getElementById("playlistModalBody"), "Working…");
+    else if (!playlistLoaded) setModalLoading(document.getElementById("playlistModalBody"), "Loading playlist…");
     if (isKeyboardInput()) requestAnimationFrame(() => focusFirstPlaylistItem());
 }
 function closePlaylist() {
@@ -1257,18 +1310,27 @@ async function playlistMultiRemove(){
         if (!confirm(`Remove ${selectedIds.length} item${selectedIds.length !== 1 ? "s" : ""} from playlist?\n\n${listText}`)) return;
     }
 
-    const failed = [];
-    for (const id of selectedIds){
-        try{
-            await apiPost("/api/playlist/remove", { id });
-            playlistSelected.delete(id);
-        }catch(e){
-            const item = playlistItems.find(it => String(it.id) === id);
-            failed.push(item ? (item.name || item.uri || id) : id);
-        }
+    const nameOf = (id) => {
+        const item = playlistItems.find(it => String(it.id) === id);
+        return item ? (item.name || item.uri || id) : id;
+    };
+
+    setUiBusy(true, `Removing ${selectedIds.length} item${selectedIds.length !== 1 ? "s" : ""}…`);
+    let result = null;
+    try{
+        const response = await apiPost("/api/playlist/remove", { ids: selectedIds });
+        result = await response.json().catch(() => null);
+    }catch(e){
+        console.error("playlist bulk remove failed", e);
+    }finally{
+        setUiBusy(false);
     }
 
-    if (failed.length) showToast(`Failed to remove: ${failed.join(", ")}`, "err");
+    const removed = Array.isArray(result?.removed) ? result.removed : [];
+    const failed = Array.isArray(result?.failed) ? result.failed : (result ? [] : selectedIds);
+    for (const id of removed) playlistSelected.delete(id);
+
+    if (failed.length) showToast(`Couldn't remove: ${failed.map(nameOf).join(", ")}`, "err");
     if (playlistWithSelectedEl) playlistWithSelectedEl.value = "";
     updatePlaylistMultiToolbar();
 }
@@ -1419,11 +1481,23 @@ function mergeClientRoster(newList){
         clientRosterMap.set(entry.cid, { ...entry, disconnected: false });
     }
     for (const [existingCid, existingEntry] of clientRosterMap){
-        if (!seen.has(existingCid) && existingEntry.reserved && !existingEntry.disconnected){
-            clientRosterMap.set(existingCid, { ...existingEntry, reserved: false, disconnected: true });
+        if (!seen.has(existingCid) && !existingEntry.disconnected){
+            clientRosterMap.set(existingCid, {
+                ...existingEntry,
+                reserved: false,
+                disconnected: true,
+                left_at: existingEntry.left_at ?? serverNowSec(),
+            });
         }
     }
     clientRoster = Array.from(clientRosterMap.values()).sort((a, b) => a.joined_at - b.joined_at);
+}
+
+// Server time is authoritative, and our time is subject to it, keeps everything in sync better.
+let serverTimeSkew = 0;
+
+function serverNowSec(){
+    return Date.now() / 1000 + serverTimeSkew;
 }
 
 function formatAgo(seconds){
@@ -1521,7 +1595,7 @@ function updateClientRosterRow(li, entry, nowSec){
 }
 
 function renderClientRoster(){
-    const nowSec = Date.now() / 1000;
+    const nowSec = serverNowSec();
 
     const existing = new Map();
     for (const li of Array.from(clientRosterEl.children)){
@@ -1560,7 +1634,7 @@ function renderClientRoster(){
 }
 
 function tickClientRosterTimes(){
-    const nowSec = Date.now() / 1000;
+    const nowSec = serverNowSec();
     for (const entry of clientRoster){
         const meta = clientRosterRowEls.get(entry.cid);
         if (meta) meta.textContent = rosterMetaText(entry, nowSec);
@@ -1610,10 +1684,14 @@ let nicknameSaveValue = "";
 function saveClientNickname(){
     const nickname = clientNicknameInput.value.trim();
     clientNicknameError.hidden = true;
+    if (!wsSend("set_nickname", { nickname })){
+        clientNicknameError.textContent = "Not connected to the host";
+        clientNicknameError.hidden = false;
+        return;
+    }
     clientsModalPendingSave = clientsModalIsFirstConnect;
     nicknameSavePending = true;
     nicknameSaveValue = nickname;
-    wsSend("set_nickname", { nickname });
 }
 
 clientsEl.addEventListener("click", () => openClientsModal(false));
@@ -1652,14 +1730,14 @@ function playlistPlay(id, resumeAt){
 function playlistRemove(id){
     if (!sid) return;
     if (!wsSend("playlist/remove", { id })) return;
-    lockForCommand("playlist");
+    lockForCommand("playlist", null, "Removing…");
 }
 
 function playlistClear() {
     if (!sid) return;
     if (!confirm("Clear the entire playlist?")) return;
     if (!wsSend("playlist/clear")) return;
-    lockForCommand("playlist");
+    lockForCommand("playlist", null, "Clearing playlist…");
 }
 
 if(btnPlaylist) btnPlaylist.addEventListener("click", openPlaylist);
@@ -1859,6 +1937,7 @@ function openFileBrowser(){
     fileBrowserState = { rootId: null, rootLabel: "", path: "", entries: [], roots: [] };
     if (fileBrowserSearchEl) fileBrowserSearchEl.value = "";
     applyFileBrowserViewMode();
+    if (_cmdLock) setFileBrowserLoading("Working…");
     loadFileBrowserRoots();
     if (isKeyboardInput()) requestAnimationFrame(() => { if (fileBrowserSearchEl) fileBrowserSearchEl.focus(); });
 }
@@ -1901,9 +1980,13 @@ function formatFileSize(n){
     return `${v.toFixed(v < 10 ? 1 : 0)} ${u[i]}`;
 }
 
-//TODO: make a page loader & disable while transitioning
+function setFileBrowserLoading(label){
+    setModalLoading(document.getElementById("fileBrowserModalBody"), label);
+}
+
 async function loadFileBrowserRoots(){
     if (!sid) return;
+    setFileBrowserLoading("Loading…");
     try{
         const response = await apiGet("/api/files/roots");
         const data = await response.json();
@@ -1921,6 +2004,9 @@ async function loadFileBrowserRoots(){
         console.error("roots load failed", e);
         fileBrowserState.entries = [];
         renderFileBrowser();
+        showToast("Couldn't load the folders", "err");
+    }finally{
+        setFileBrowserLoading(null);
     }
 }
 
@@ -1953,6 +2039,7 @@ function reconcileFileBrowserEntriesFromPlaylist(){
 
 async function loadFileBrowserDirectory(rootId, path){
     if (!sid) return;
+    setFileBrowserLoading("Loading…");
     try{
         const response = await apiGet(`/api/files?root=${encodeURIComponent(rootId)}&path=${encodeURIComponent(path || "")}`);
         const data = await response.json();
@@ -1964,6 +2051,9 @@ async function loadFileBrowserDirectory(rootId, path){
         renderFileBrowser();
     }catch(e){
         console.error("dir load failed", e);
+        showToast("Couldn't open that folder", "err");
+    }finally{
+        setFileBrowserLoading(null);
     }
 }
 
@@ -2231,10 +2321,10 @@ function updateFileBrowserGroupHeaders(){
     const headers = fileBrowserItemsEl.querySelectorAll("li[data-type='group-header']");
     for (const header of headers){
         const items = [];
-        let sib = header.nextSibling;
+        let sib = header.nextElementSibling;
         while (sib && sib.dataset.type !== "group-header"){
-            if (sib.dataset && sib.dataset.type === "file") items.push(sib);
-            sib = sib.nextSibling;
+            if (sib.dataset.type === "file") items.push(sib);
+            sib = sib.nextElementSibling;
         }
         const keys = items.map(el => el.dataset.key);
         const allSelected = keys.length > 0 && keys.every(k => fileBrowserSelected.has(k));
@@ -2281,10 +2371,10 @@ function toggleFileBrowserItem(key){
 function toggleFileBrowserGroup(headerLi){
     if (!fileBrowserMultiActive || !fileBrowserItemsEl) return;
     const items = [];
-    let sib = headerLi.nextSibling;
-    while (sib && (!sib.dataset || sib.dataset.type !== "group-header")){
-        if (sib.dataset && sib.dataset.type === "file") items.push(sib);
-        sib = sib.nextSibling;
+    let sib = headerLi.nextElementSibling;
+    while (sib && sib.dataset.type !== "group-header"){
+        if (sib.dataset.type === "file") items.push(sib);
+        sib = sib.nextElementSibling;
     }
     const keys = items.map(el => el.dataset.key);
     const allSelected = keys.length > 0 && keys.every(k => fileBrowserSelected.has(k));
@@ -2318,22 +2408,42 @@ async function fileBrowserMultiAdd(){
         : [];
     if (!fileItems.length) return;
 
-    const failed = [];
+    const byPath = new Map();
     for (const li of fileItems){
         const name = li.dataset.entryName;
-        try{
-            const rel = fileBrowserChildPath(name);
-            await apiPost("/api/files/add", { root: fileBrowserState.rootId, path: rel });
-            fileBrowserSelected.delete(li.dataset.key);
-            li.classList.remove("is-selected");
-        }catch(e){
-            failed.push(name);
-        }
+        byPath.set(fileBrowserChildPath(name), { li, name });
+    }
+    const paths = [...byPath.keys()];
+
+    setUiBusy(true, `Adding ${paths.length} file${paths.length !== 1 ? "s" : ""}…`);
+    let result = null;
+    try{
+        const response = await apiPost("/api/files/add", { root: fileBrowserState.rootId, paths });
+        result = await response.json().catch(() => null);
+    }catch(e){
+        console.error("files bulk add failed", e);
+    }finally{
+        setUiBusy(false);
     }
 
-    const added = fileItems.length - failed.length;
+    const addedPaths = Array.isArray(result?.added) ? result.added : [];
+    const alreadyPaths = Array.isArray(result?.already) ? result.already : [];
+    const failedPaths = Array.isArray(result?.failed) ? result.failed : (result ? [] : paths);
+
+    for (const rel of [...addedPaths, ...alreadyPaths]){
+        const entry = byPath.get(rel);
+        if (!entry) continue;
+        fileBrowserSelected.delete(entry.li.dataset.key);
+        entry.li.classList.remove("is-selected");
+    }
+
+    const added = addedPaths.length;
     if (added > 0) showToast(`Added ${added} file${added !== 1 ? "s" : ""}`, "ok");
-    if (failed.length) showToast(`Failed to add: ${failed.join(", ")}`, "err");
+    if (alreadyPaths.length) showToast(`${alreadyPaths.length} file${alreadyPaths.length !== 1 ? "s were" : " was"} already in the playlist`, "info");
+    if (failedPaths.length){
+        const names = failedPaths.map(rel => byPath.get(rel)?.name || rel);
+        showToast(`Couldn't add: ${names.join(", ")}`, "err");
+    }
     if (fileBrowserWithSelectedEl) fileBrowserWithSelectedEl.value = "";
     updateFileBrowserMultiToolbar();
     updateFileBrowserGroupHeaders();
@@ -2375,16 +2485,21 @@ async function fileBrowserMultiRemove(){
         if (!confirm(`Remove ${toRemove.length} item${toRemove.length !== 1 ? "s" : ""} from playlist?\n\n${listText}`)) return;
     }
 
-    const failed = [];
-    const successKeys = new Set();
-    for (const item of toRemove){
-        try{
-            await apiPost("/api/playlist/remove", { id: item.id });
-            successKeys.add(item.key);
-        }catch(e){
-            failed.push(item.name);
-        }
+    setUiBusy(true, `Removing ${toRemove.length} item${toRemove.length !== 1 ? "s" : ""}…`);
+    let result = null;
+    try{
+        const response = await apiPost("/api/playlist/remove", { ids: toRemove.map(item => item.id) });
+        result = await response.json().catch(() => null);
+    }catch(e){
+        console.error("playlist bulk remove failed", e);
+    }finally{
+        setUiBusy(false);
     }
+
+    const removedIds = new Set(Array.isArray(result?.removed) ? result.removed : []);
+    const failedIds = new Set(Array.isArray(result?.failed) ? result.failed : (result ? [] : toRemove.map(item => item.id)));
+    const successKeys = new Set(toRemove.filter(item => removedIds.has(item.id)).map(item => item.key));
+    const failed = toRemove.filter(item => failedIds.has(item.id)).map(item => item.name);
 
     for (const key of successKeys){
         fileBrowserSelected.delete(key);
@@ -2394,7 +2509,7 @@ async function fileBrowserMultiRemove(){
         }
     }
 
-    if (failed.length) showToast(`Failed to remove: ${failed.join(", ")}`, "err");
+    if (failed.length) showToast(`Couldn't remove: ${failed.join(", ")}`, "err");
     if (fileBrowserWithSelectedEl) fileBrowserWithSelectedEl.value = "";
     updateFileBrowserMultiToolbar();
     updateFileBrowserGroupHeaders();
@@ -2496,14 +2611,16 @@ async function filesAdd(name){
     try{
         const response = await apiPost("/api/files/add", { root: fileBrowserState.rootId, path: rel });
         const data = await response.json().catch(() => ({}));
-        if (data.status === "already_present"){
-            showToast(`Already in playlist: ${name}`, "info");
+        if (data.already?.length){
+            showToast(`${name} is already in the playlist`, "info");
+        } else if (data.failed?.length){
+            showToast(`Couldn't add ${name}`, "err");
         } else {
             showToast(`Added: ${name}`, "ok");
         }
     }catch(e){
         console.error("files add failed", e);
-        showToast(`Failed to add: ${name}`, "err");
+        showToast(`Couldn't add ${name}`, "err");
     }finally{
         setUiBusy(false);
     }
@@ -2531,15 +2648,15 @@ async function filesPlay(name){
         const response = await apiPost("/api/files/play", body);
         const data = await response.json().catch(() => ({}));
         if (data.status === "jumped"){
-            showToast(resumeAt > 0 ? `Resuming: ${name}` : `Playing existing entry: ${name}`, "info");
+            showToast(resumeAt > 0 ? `Resuming: ${name}` : "Already in the playlist, playing now", "info");
         } else {
-            showToast(resumeAt > 0 ? `Resuming: ${name}` : `Added & playing: ${name}`, "ok");
+            showToast(resumeAt > 0 ? `Resuming: ${name}` : `Added ${name}, playing now`, "ok");
         }
         closeFileBrowser();
         closePlaylist();
     }catch(e){
         console.error("files play failed", e);
-        showToast(`Failed to play: ${name}`, "err");
+        showToast(`Couldn't play ${name}`, "err");
     }finally{
         setUiBusy(false);
     }
@@ -2603,7 +2720,8 @@ async function fetchClients(){
         const res = await fetch(`/api/clients?t=${encodeURIComponent(token)}&cid=${encodeURIComponent(cid)}`, { cache: "no-store" });
         if (!res.ok) return null;
         const data = await res.json();
-        if (clientsEl) clientsEl.textContent = `clients: ${data.clients}/${data.max}`;
+        if (typeof data.now === "number") serverTimeSkew = data.now - Date.now() / 1000;
+        if (clientsEl) clientsEl.textContent = `Clients: ${data.clients}/${data.max}`;
         return data;
     }catch{
         return null;
@@ -2625,7 +2743,7 @@ function startPolling(){
         if (data){
             const cd = Number(data.cooldown || 0);
             if (data.admit_for_cid){
-                if (wsEl) wsEl.textContent = "ws: connecting";
+                if (wsEl) wsEl.textContent = "Connecting…";
                 connectWS();
             } else {
                 if (data.clients >= data.max) lockUI("full", cd);
@@ -2643,14 +2761,9 @@ function startPolling(){
 }
 
 document.addEventListener("visibilitychange", () => {
-    if (document.hidden){
-        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "visibility", state: "hidden" }));
-        return;
-    }
-    if (ws && ws.readyState === WebSocket.OPEN){
-        ws.send(JSON.stringify({ type: "visibility", state: "visible" }));
-        return;
-    }
+    if (document.hidden) return;
+    // backgrounded tabs can have their socket die silently (mobile OS suspension) without onclose firing
+    if (ws && ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING) ws = null;
     if (!ws) connectWS();
 });
 
@@ -2664,7 +2777,7 @@ function connectWS(){
         + (storedNickname ? `&nickname=${encodeURIComponent(storedNickname)}` : "");
     ws = new WebSocket(url);
 
-    ws.onopen = () => { if (wsEl) wsEl.textContent = "ws: connected"; };
+    ws.onopen = () => { if (wsEl) wsEl.textContent = "Connected"; };
 
     ws.onclose = (ev) => {
         ws = null;
@@ -2674,12 +2787,12 @@ function connectWS(){
             sid = "";
             lockUI("waiting");
         } else {
-            if (wsEl) wsEl.textContent = "ws: waiting";
+            if (wsEl) wsEl.textContent = "Not connected";
         }
         startPolling();
     };
 
-    ws.onerror = () => { if (wsEl) wsEl.textContent = "ws: waiting"; };
+    ws.onerror = () => { if (wsEl) wsEl.textContent = "Not connected"; };
 
     ws.onmessage = (ev) => {
         try{
@@ -2687,16 +2800,23 @@ function connectWS(){
 
             if (msg.type === "clients"){
                 const d = msg.data || {};
-                if (clientsEl) clientsEl.textContent = `clients: ${d.clients}/${d.max}`;
+                if (typeof d.now === "number") serverTimeSkew = d.now - Date.now() / 1000;
+                if (clientsEl) clientsEl.textContent = `Clients: ${d.clients}/${d.max}`;
                 if (Array.isArray(d.list)){
                     mergeClientRoster(d.list);
                     if (isClientsOpen()) renderClientRoster();
                 }
             }
 
+            if (msg.type === "cmd_ack"){
+                if (_cmdLock && (_cmdLock.expect === "state" || _cmdLock.expect === "nav")) _unlockCommand();
+                return;
+            }
+
             if (msg.type === "nickname_ok"){
                 nicknameSavePending = false;
                 localStorage.setItem(NICKNAME_KEY, nicknameSaveValue);
+                showToast(nicknameSaveValue ? `Nickname set: ${nicknameSaveValue}` : "Nickname cleared", "ok");
                 if (clientsModalPendingSave && isClientsOpen()) closeClientsModal();
             }
 
@@ -2715,12 +2835,14 @@ function connectWS(){
                 }
                 const knownErrors = {
                     "seeking not allowed": "Seeking is disabled",
+                    "nothing is loaded": "Nothing is loaded",
+                    "nothing to skip to": "Nothing to skip to",
                     "playlist control not allowed": "Playlist control is disabled",
                     "id required": "Something went wrong",
                     "val required": "Something went wrong",
                     "unknown op": "Something went wrong",
                 };
-                const friendly = knownErrors[msg.message] ?? "VLC is not responding";
+                const friendly = knownErrors[msg.message] ?? "Something went wrong";
                 showToast(friendly, "err");
                 console.warn("cmd_error", msg);
                 return;
@@ -2729,7 +2851,7 @@ function connectWS(){
             if (msg.type === "shutdown"){
                 const reasons = {
                     stopped: "Host stopped the session",
-                    crashed: "Host crashed unexpectedly",
+                    crashed: "The host's VLC Control crashed",
                 };
                 shutdownNotified = true;
                 showToast(reasons[msg.reason] || "Host disconnected", "err", Infinity);
@@ -2769,6 +2891,10 @@ function connectWS(){
             if (msg.type === "playlist"){
                 playlistItems = Array.isArray(msg.data) ? msg.data : [];
                 window.__playlist = playlistItems;
+                if (!playlistLoaded){
+                    playlistLoaded = true;
+                    if (!_cmdLock) setModalLoading(document.getElementById("playlistModalBody"), null);
+                }
                 if (_cmdLock && _cmdLock.expect === "playlist") _unlockCommand();
                 renderPlaylist();
                 if (isFileBrowserOpen() && fileBrowserState.rootId){

@@ -75,32 +75,68 @@ Or launch "VLC Control" from your app menu.
 
 On startup it will:
 1. Load `~/.config/vlc-control/config.toml`
-2. Generate a fresh access token (new every run)
-3. Start VLC with HTTP control if it isn't already running
-4. Start the bridge server
-5. Start a Cloudflare tunnel (if enabled and installed)
-6. Print the local URL and the share link
+2. Generate a fresh access token (new every run) and print the local URL
+3. Launch the Cloudflare tunnel in the background (if enabled and installed), so it registers with Cloudflare while the rest starts
+4. Start VLC with HTTP control if it isn't already running
+5. Start the bridge server
+6. Check the bridge is alive and answering, then print the share link
 
 ```
-Token:     <random>
-Local URL: http://127.0.0.1:5000/?t=<token>
+vlc-control 0.5.0 (<commit hash><"+" if files are modified>)
+Installed:  10 Aug 2026, 07:20 (2 hours ago)
+Updated:    09 Aug 2026, 09:17 (1 day ago)
+
+Token:      <random>
+Local URL:  http://127.0.0.1:5000/?t=<token>
 
 ==================== SHARE LINK ====================
 https://<random>.trycloudflare.com/?t=<token>
 ====================================================
+
+[OK] Running.
+Press Ctrl+C to stop.
 ```
 
 The share link is what you send to people. Anyone with it can control playback.
+
+How much of that you see is up to you. `[status] show` in the config lists what gets printed, and taking an item out of the list hides it:
+
+| Item | What it adds |
+| ---- | ------------ |
+| `version` | The version line, with the commit it was installed from |
+| `installed` | When this copy was installed, and which version it replaced |
+| `updated` | When the files it was installed from last changed |
+| `stale` | A warning when those files have changed since you installed |
+| `paths` | Where it's installed and where it was installed from |
+| `seats` | Seat limit and grace period |
+| `runtime` | Python and cloudflared versions |
+| `token` | The bare token line (the local URL already contains it) |
+| `steps` | Progress lines while VLC, the bridge and the tunnel start up |
+| `ready` | The config path and log file list at the end |
+| `logkey` | One line explaining the `+`, `-`, `*`, `~`, `!` and `x` tags in the live log |
+
+`paths`, `seats` and `runtime` are the three left out by default. Once you know the tags off by heart, `logkey` is the next one most people drop. Whatever you remove, the local URL, the share link, `[OK] Running` and the Ctrl+C hint always print, along with any warning or error, since without those you'd have no link to hand out and no way to tell it had finished starting. `show = []` gets you exactly that and nothing else.
 
 **CLI options:**
 
 ```
 vlc-control --seats 4     # override max seats for this run
 vlc-control -s 1          # same, short form
+vlc-control --version     # or -v
 vlc-control --help
 ```
 
 The `--seats` flag overrides `max_clients` for that run only, doesn't touch the config file.
+
+### Keeping the installed copy current
+
+`install.sh` copies everything into `~/.local/share/vlc-control/`, so pulling a newer version or editing the files yourself changes nothing until you install again. That's what the `stale` item watches for:
+
+```
+[!] The source has changed since this copy was installed - re-run install.sh to pick the changes up.
+```
+
+Re-running `./install.sh` keeps the `config.toml` you already have and only adds keys that are new.
 
 ### Host log
 
@@ -110,12 +146,15 @@ While running, the terminal shows a live log of what's happening:
 [14:32:01] [+] C1 joined
 [14:32:05] [*] C1 paused playback
 [14:32:19] [*] Alex seeked to 12:04 / 34:10
-[14:33:02] [*] Playlist updated: Alex switched to "episode 2.mkv"
-[14:35:00] [*] Host resumed playback
-[14:36:10] [-] C1 left
+[14:33:02] [*] Alex switched to "episode 2.mkv"
+[14:35:00] [*] Host started playback
+[14:35:48] [~] VLC advanced to "episode 3.mkv"
+[14:36:10] [-] C1 left (seat held for 30s)
 ```
 
-Guests show up under their nickname if they've set one, otherwise a fallback identity (`C1`, `C2`, ... by default - see `client_id_style`). Actions VLC took without going through the web UI (you clicking pause in VLC itself) are attributed to `Host`.
+`+` joined, `-` left, `*` an action someone took, `~` something VLC did on its own, `!` a problem, `x` fatal, something that stopped the run before it got this far.
+
+Guests show up under their nickname if they've set one, otherwise a fallback identity (`C1`, `C2`, ... by default - see `client_id_style`). Anything you do in VLC itself rather than through the web UI is attributed to `Host`. Lines tagged `[~]` are things nobody did: a track ending and the next one starting, the playlist running out, VLC dropping off the network.
 
 ---
 
@@ -126,6 +165,7 @@ Everything lives in one file: `~/.config/vlc-control/config.toml`. It's heavily 
 | Section | What it controls |
 | ------- | ---------------- |
 | `[system]` | Server port, seats and grace period, VLC connection/launch, tunnel mode, logging, client identity, action debounce. Never sent to guests. |
+| `[status]` | Which version/install details the runner prints to the console on startup. Host-side only. |
 | `[file_browse]` | Whether guests can browse files at all, which directories, allowed extensions, blacklists. All enforced server-side. |
 | `[features]` | Feature switches. Flags marked `[server]` in the file (seeking, playlist control) block the API call itself, not just the button. |
 | `[layout]` | Show/hide individual UI sections - purely visual. |
@@ -147,10 +187,13 @@ A few `[system]` keys worth knowing about:
 | `cloudflare` | Tunnel behavior: `auto`, `on`, `off` | `auto` |
 | `client_id_style` | Fallback guest identity: `numeric`, `cid`, `short_cid`, `ip` | `numeric` |
 | `action_debounce_ms` | Window for resolving simultaneous play/pause/stop presses | `250` |
+| `http_access_log` | Write a line per HTTP request to `vlc-access.log` (includes the token) | `false` |
 
 The access token is **not** in the config — it's generated fresh on every run and only lives in memory.
 
-`cloudflare = "auto"` starts a tunnel if `cloudflared` is installed, skips silently if not. `on` requires it and errors if missing. `off` disables it entirely.
+`cloudflare = "auto"` starts a tunnel if `cloudflared` is installed and skips it if not. If the tunnel then fails to come up, it says why and carries on with the local URL. `on` treats the share link as the point of the run, so anything that stops the tunnel stops the run. `off` disables it entirely.
+
+Either way, the bridge itself has to be alive and accepting this run's token before you get any URL at all. If it isn't, the run stops rather than hand you a link that answers nothing.
 
 ### File browsing
 
@@ -188,7 +231,7 @@ Clicking the time display toggles between elapsed/total and elapsed/remaining.
 
 `max_clients` (default 2) controls how many unique browsers can be connected at once. This isn't about page views — it's about control slots.
 
-When someone disconnects (closes the tab, loses connection), their seat isn't freed immediately. It's held for `grace_seconds` (default 30) so they can reconnect without someone else taking their spot. If they don't come back in time, the seat opens up.
+When someone disconnects (closes the tab, loses connection), their seat isn't freed immediately. It's held for `grace_seconds` (default 30) so they can reconnect without someone else taking their spot. If they don't come back in time, the seat opens up. Set `grace_seconds = 0` to turn grace off entirely - the seat frees the instant they disconnect.
 
 If the server is full, new visitors see a waiting screen that polls automatically and connects them when a seat opens.
 
@@ -201,8 +244,9 @@ While running, logs are written to `log_dir` (default `/tmp`):
 - `vlc-bridge.log` — bridge server events, timestamped
 - `vlc-http.log` — VLC process output (if started by vlc-control)
 - `vlc-cloudflared.log` — tunnel output
+- `vlc-access.log` — one line per HTTP request, only when `http_access_log = true`
 
-The terminal log is a friendly rendering of the bridge log; the file has the full detail.
+All of them are truncated at the start of every run, so what you're looking at is always this session. The terminal log is a friendly rendering of the bridge log; the file has the full detail.
 
 ---
 
