@@ -25,6 +25,7 @@ window.uiConfig = window.uiConfig || {
         showIcons: true,
         showSystemStatus: true,
         showFooter: true,
+        showVersion: true,
         showPlaylist: true,
         showPlaylistPrevNext: true,
         showPlaylistProgressEntries: true,
@@ -142,6 +143,13 @@ function applyUiConfigToDom(){
     if (footer){
         footer.textContent = window.uiConfig.footerText || "";
         footer.hidden = !window.uiConfig.footerText;
+    }
+
+    const versionEl = document.getElementById("appVersion");
+    if (versionEl){
+        const version = window.uiConfig.version || "";
+        versionEl.textContent = version ? `v${version}` : "";
+        versionEl.hidden = !version || layout.showVersion === false;
     }
 
     if (window.uiConfig.title) document.title = String(window.uiConfig.title);
@@ -642,28 +650,28 @@ function lockUI(reason, cooldownSec=0){
     if (!wsEl || !titleEl || !stateEl) return;
 
     if (reason === "full"){
-        wsEl.textContent = "ws: waiting";
-        titleEl.textContent = "Server full";
-        setAttrIfChanged(titleEl, "title", "Server full");
-        stateEl.textContent = "state: full";
+        wsEl.textContent = "Not connected";
+        titleEl.textContent = "All seats taken";
+        setAttrIfChanged(titleEl, "title", "All seats taken");
+        stateEl.textContent = "All seats taken";
         if (clockEl) clockEl.textContent = "0:00 / 0:00";
-        document.title = "VLC Control - FULL";
-        if (statusTextEl) statusTextEl.textContent = "Server full - waiting for a slot…";
+        document.title = "VLC Control — FULL";
+        if (statusTextEl) statusTextEl.textContent = "All seats taken, waiting for one to free up…";
         setStatusPill("err", "FULL");
     } else if (reason === "cooldown"){
-        wsEl.textContent = "ws: waiting";
+        wsEl.textContent = "Not connected";
         titleEl.textContent = "Waiting for grace…";
         setAttrIfChanged(titleEl, "title", "Waiting for grace…");
-        stateEl.textContent = `state: grace (${cooldownSec}s)`;
+        stateEl.textContent = `Seat held (${cooldownSec}s)`;
         if (clockEl) clockEl.textContent = "0:00 / 0:00";
-        document.title = "VLC Control - WAITING";
-        if (statusTextEl) statusTextEl.textContent = `Seat reserved - grace remaining (${cooldownSec}s)…`;
+        document.title = "VLC Control — WAITING";
+        if (statusTextEl) statusTextEl.textContent = `Your seat is being held (${cooldownSec}s)…`;
         setStatusPill("", "WAIT");
     } else {
-        wsEl.textContent = "ws: waiting";
-        titleEl.textContent = "Waiting for a slot…";
-        setAttrIfChanged(titleEl, "title", "Waiting for a slot…");
-        stateEl.textContent = "state: waiting";
+        wsEl.textContent = "Not connected";
+        titleEl.textContent = "Waiting for a seat…";
+        setAttrIfChanged(titleEl, "title", "Waiting for a seat…");
+        stateEl.textContent = "Waiting for a seat";
         if (clockEl) clockEl.textContent = "0:00 / 0:00";
         document.title = "VLC Control — WAITING";
         if (statusTextEl) statusTextEl.textContent = "Waiting…";
@@ -674,9 +682,9 @@ function lockUI(reason, cooldownSec=0){
 function unlockUI(){
     setControlsBusy(false);
     if (seekBarEl) seekBarEl.disabled = false;
-    if (statusTextEl) statusTextEl.textContent = "Admitted";
+    if (statusTextEl) statusTextEl.textContent = "Connected";
     setStatusPill("ok", "OK");
-    if (wsEl) wsEl.textContent = "ws: connected";
+    if (wsEl) wsEl.textContent = "Connected";
     const playlistModalEl = document.getElementById("playlistModal");
     if (playlistModalEl) playlistModalEl.classList.remove("busy");
     const fileBrowserModalEl = document.getElementById("fileBrowserModal");
@@ -694,7 +702,8 @@ function applyStatus(status){
     const mediaTitle = (lastStatus.title && String(lastStatus.title).trim()) ? String(lastStatus.title).trim() : "Nothing playing";
     setText(titleEl, mediaTitle);
     setAttrIfChanged(titleEl, "title", mediaTitle);
-    setText(stateEl, `state: ${lastStatus.state || "unknown"}`);
+    const playbackState = lastStatus.state || "unknown";
+    setText(stateEl, playbackState.charAt(0).toUpperCase() + playbackState.slice(1));
 
     if (newState !== prevState) {
         updatePlayPauseButtonFromState(newState);
@@ -886,7 +895,7 @@ function updatePlaylistCountChip(){
     const count = playlistItems.length;
     const countStr = String(count);
     if (playlistCountChip.textContent !== countStr) playlistCountChip.textContent = countStr;
-    const title = `${count} in playlist`;
+    const title = `${count} item${count !== 1 ? "s" : ""} in the playlist`;
     if (playlistCountChip.title !== title) playlistCountChip.title = title;
 }
 
@@ -1301,22 +1310,27 @@ async function playlistMultiRemove(){
         if (!confirm(`Remove ${selectedIds.length} item${selectedIds.length !== 1 ? "s" : ""} from playlist?\n\n${listText}`)) return;
     }
 
-    const failed = [];
-    let done = 0;
-    for (const id of selectedIds){
-        setUiBusy(true, `Removing ${done + 1} of ${selectedIds.length}…`);
-        try{
-            await apiPost("/api/playlist/remove", { id });
-            playlistSelected.delete(id);
-        }catch(e){
-            const item = playlistItems.find(it => String(it.id) === id);
-            failed.push(item ? (item.name || item.uri || id) : id);
-        }
-        done++;
-    }
-    setUiBusy(false);
+    const nameOf = (id) => {
+        const item = playlistItems.find(it => String(it.id) === id);
+        return item ? (item.name || item.uri || id) : id;
+    };
 
-    if (failed.length) showToast(`Failed to remove: ${failed.join(", ")}`, "err");
+    setUiBusy(true, `Removing ${selectedIds.length} item${selectedIds.length !== 1 ? "s" : ""}…`);
+    let result = null;
+    try{
+        const response = await apiPost("/api/playlist/remove", { ids: selectedIds });
+        result = await response.json().catch(() => null);
+    }catch(e){
+        console.error("playlist bulk remove failed", e);
+    }finally{
+        setUiBusy(false);
+    }
+
+    const removed = Array.isArray(result?.removed) ? result.removed : [];
+    const failed = Array.isArray(result?.failed) ? result.failed : (result ? [] : selectedIds);
+    for (const id of removed) playlistSelected.delete(id);
+
+    if (failed.length) showToast(`Couldn't remove: ${failed.map(nameOf).join(", ")}`, "err");
     if (playlistWithSelectedEl) playlistWithSelectedEl.value = "";
     updatePlaylistMultiToolbar();
 }
@@ -1467,11 +1481,23 @@ function mergeClientRoster(newList){
         clientRosterMap.set(entry.cid, { ...entry, disconnected: false });
     }
     for (const [existingCid, existingEntry] of clientRosterMap){
-        if (!seen.has(existingCid) && existingEntry.reserved && !existingEntry.disconnected){
-            clientRosterMap.set(existingCid, { ...existingEntry, reserved: false, disconnected: true });
+        if (!seen.has(existingCid) && !existingEntry.disconnected){
+            clientRosterMap.set(existingCid, {
+                ...existingEntry,
+                reserved: false,
+                disconnected: true,
+                left_at: existingEntry.left_at ?? serverNowSec(),
+            });
         }
     }
     clientRoster = Array.from(clientRosterMap.values()).sort((a, b) => a.joined_at - b.joined_at);
+}
+
+// Server time is authoritative, and our time is subject to it, keeps everything in sync better.
+let serverTimeSkew = 0;
+
+function serverNowSec(){
+    return Date.now() / 1000 + serverTimeSkew;
 }
 
 function formatAgo(seconds){
@@ -1569,7 +1595,7 @@ function updateClientRosterRow(li, entry, nowSec){
 }
 
 function renderClientRoster(){
-    const nowSec = Date.now() / 1000;
+    const nowSec = serverNowSec();
 
     const existing = new Map();
     for (const li of Array.from(clientRosterEl.children)){
@@ -1608,7 +1634,7 @@ function renderClientRoster(){
 }
 
 function tickClientRosterTimes(){
-    const nowSec = Date.now() / 1000;
+    const nowSec = serverNowSec();
     for (const entry of clientRoster){
         const meta = clientRosterRowEls.get(entry.cid);
         if (meta) meta.textContent = rosterMetaText(entry, nowSec);
@@ -1978,7 +2004,7 @@ async function loadFileBrowserRoots(){
         console.error("roots load failed", e);
         fileBrowserState.entries = [];
         renderFileBrowser();
-        showToast("Could not load folders", "err");
+        showToast("Couldn't load the folders", "err");
     }finally{
         setFileBrowserLoading(null);
     }
@@ -2025,7 +2051,7 @@ async function loadFileBrowserDirectory(rootId, path){
         renderFileBrowser();
     }catch(e){
         console.error("dir load failed", e);
-        showToast("Could not open that folder", "err");
+        showToast("Couldn't open that folder", "err");
     }finally{
         setFileBrowserLoading(null);
     }
@@ -2382,26 +2408,42 @@ async function fileBrowserMultiAdd(){
         : [];
     if (!fileItems.length) return;
 
-    const failed = [];
-    let done = 0;
+    const byPath = new Map();
     for (const li of fileItems){
         const name = li.dataset.entryName;
-        setUiBusy(true, `Adding ${done + 1} of ${fileItems.length}…`);
-        try{
-            const rel = fileBrowserChildPath(name);
-            await apiPost("/api/files/add", { root: fileBrowserState.rootId, path: rel });
-            fileBrowserSelected.delete(li.dataset.key);
-            li.classList.remove("is-selected");
-        }catch(e){
-            failed.push(name);
-        }
-        done++;
+        byPath.set(fileBrowserChildPath(name), { li, name });
     }
-    setUiBusy(false);
+    const paths = [...byPath.keys()];
 
-    const added = fileItems.length - failed.length;
+    setUiBusy(true, `Adding ${paths.length} file${paths.length !== 1 ? "s" : ""}…`);
+    let result = null;
+    try{
+        const response = await apiPost("/api/files/add", { root: fileBrowserState.rootId, paths });
+        result = await response.json().catch(() => null);
+    }catch(e){
+        console.error("files bulk add failed", e);
+    }finally{
+        setUiBusy(false);
+    }
+
+    const addedPaths = Array.isArray(result?.added) ? result.added : [];
+    const alreadyPaths = Array.isArray(result?.already) ? result.already : [];
+    const failedPaths = Array.isArray(result?.failed) ? result.failed : (result ? [] : paths);
+
+    for (const rel of [...addedPaths, ...alreadyPaths]){
+        const entry = byPath.get(rel);
+        if (!entry) continue;
+        fileBrowserSelected.delete(entry.li.dataset.key);
+        entry.li.classList.remove("is-selected");
+    }
+
+    const added = addedPaths.length;
     if (added > 0) showToast(`Added ${added} file${added !== 1 ? "s" : ""}`, "ok");
-    if (failed.length) showToast(`Failed to add: ${failed.join(", ")}`, "err");
+    if (alreadyPaths.length) showToast(`${alreadyPaths.length} file${alreadyPaths.length !== 1 ? "s were" : " was"} already in the playlist`, "info");
+    if (failedPaths.length){
+        const names = failedPaths.map(rel => byPath.get(rel)?.name || rel);
+        showToast(`Couldn't add: ${names.join(", ")}`, "err");
+    }
     if (fileBrowserWithSelectedEl) fileBrowserWithSelectedEl.value = "";
     updateFileBrowserMultiToolbar();
     updateFileBrowserGroupHeaders();
@@ -2443,20 +2485,21 @@ async function fileBrowserMultiRemove(){
         if (!confirm(`Remove ${toRemove.length} item${toRemove.length !== 1 ? "s" : ""} from playlist?\n\n${listText}`)) return;
     }
 
-    const failed = [];
-    const successKeys = new Set();
-    let done = 0;
-    for (const item of toRemove){
-        setUiBusy(true, `Removing ${done + 1} of ${toRemove.length}…`);
-        try{
-            await apiPost("/api/playlist/remove", { id: item.id });
-            successKeys.add(item.key);
-        }catch(e){
-            failed.push(item.name);
-        }
-        done++;
+    setUiBusy(true, `Removing ${toRemove.length} item${toRemove.length !== 1 ? "s" : ""}…`);
+    let result = null;
+    try{
+        const response = await apiPost("/api/playlist/remove", { ids: toRemove.map(item => item.id) });
+        result = await response.json().catch(() => null);
+    }catch(e){
+        console.error("playlist bulk remove failed", e);
+    }finally{
+        setUiBusy(false);
     }
-    setUiBusy(false);
+
+    const removedIds = new Set(Array.isArray(result?.removed) ? result.removed : []);
+    const failedIds = new Set(Array.isArray(result?.failed) ? result.failed : (result ? [] : toRemove.map(item => item.id)));
+    const successKeys = new Set(toRemove.filter(item => removedIds.has(item.id)).map(item => item.key));
+    const failed = toRemove.filter(item => failedIds.has(item.id)).map(item => item.name);
 
     for (const key of successKeys){
         fileBrowserSelected.delete(key);
@@ -2466,7 +2509,7 @@ async function fileBrowserMultiRemove(){
         }
     }
 
-    if (failed.length) showToast(`Failed to remove: ${failed.join(", ")}`, "err");
+    if (failed.length) showToast(`Couldn't remove: ${failed.join(", ")}`, "err");
     if (fileBrowserWithSelectedEl) fileBrowserWithSelectedEl.value = "";
     updateFileBrowserMultiToolbar();
     updateFileBrowserGroupHeaders();
@@ -2568,14 +2611,16 @@ async function filesAdd(name){
     try{
         const response = await apiPost("/api/files/add", { root: fileBrowserState.rootId, path: rel });
         const data = await response.json().catch(() => ({}));
-        if (data.status === "already_present"){
-            showToast(`Already in playlist: ${name}`, "info");
+        if (data.already?.length){
+            showToast(`${name} is already in the playlist`, "info");
+        } else if (data.failed?.length){
+            showToast(`Couldn't add ${name}`, "err");
         } else {
             showToast(`Added: ${name}`, "ok");
         }
     }catch(e){
         console.error("files add failed", e);
-        showToast(`Failed to add: ${name}`, "err");
+        showToast(`Couldn't add ${name}`, "err");
     }finally{
         setUiBusy(false);
     }
@@ -2603,15 +2648,15 @@ async function filesPlay(name){
         const response = await apiPost("/api/files/play", body);
         const data = await response.json().catch(() => ({}));
         if (data.status === "jumped"){
-            showToast(resumeAt > 0 ? `Resuming: ${name}` : `Playing existing entry: ${name}`, "info");
+            showToast(resumeAt > 0 ? `Resuming: ${name}` : "Already in the playlist, playing now", "info");
         } else {
-            showToast(resumeAt > 0 ? `Resuming: ${name}` : `Added & playing: ${name}`, "ok");
+            showToast(resumeAt > 0 ? `Resuming: ${name}` : `Added ${name}, playing now`, "ok");
         }
         closeFileBrowser();
         closePlaylist();
     }catch(e){
         console.error("files play failed", e);
-        showToast(`Failed to play: ${name}`, "err");
+        showToast(`Couldn't play ${name}`, "err");
     }finally{
         setUiBusy(false);
     }
@@ -2675,7 +2720,8 @@ async function fetchClients(){
         const res = await fetch(`/api/clients?t=${encodeURIComponent(token)}&cid=${encodeURIComponent(cid)}`, { cache: "no-store" });
         if (!res.ok) return null;
         const data = await res.json();
-        if (clientsEl) clientsEl.textContent = `clients: ${data.clients}/${data.max}`;
+        if (typeof data.now === "number") serverTimeSkew = data.now - Date.now() / 1000;
+        if (clientsEl) clientsEl.textContent = `Clients: ${data.clients}/${data.max}`;
         return data;
     }catch{
         return null;
@@ -2697,7 +2743,7 @@ function startPolling(){
         if (data){
             const cd = Number(data.cooldown || 0);
             if (data.admit_for_cid){
-                if (wsEl) wsEl.textContent = "ws: connecting";
+                if (wsEl) wsEl.textContent = "Connecting…";
                 connectWS();
             } else {
                 if (data.clients >= data.max) lockUI("full", cd);
@@ -2731,7 +2777,7 @@ function connectWS(){
         + (storedNickname ? `&nickname=${encodeURIComponent(storedNickname)}` : "");
     ws = new WebSocket(url);
 
-    ws.onopen = () => { if (wsEl) wsEl.textContent = "ws: connected"; };
+    ws.onopen = () => { if (wsEl) wsEl.textContent = "Connected"; };
 
     ws.onclose = (ev) => {
         ws = null;
@@ -2741,12 +2787,12 @@ function connectWS(){
             sid = "";
             lockUI("waiting");
         } else {
-            if (wsEl) wsEl.textContent = "ws: waiting";
+            if (wsEl) wsEl.textContent = "Not connected";
         }
         startPolling();
     };
 
-    ws.onerror = () => { if (wsEl) wsEl.textContent = "ws: waiting"; };
+    ws.onerror = () => { if (wsEl) wsEl.textContent = "Not connected"; };
 
     ws.onmessage = (ev) => {
         try{
@@ -2754,11 +2800,17 @@ function connectWS(){
 
             if (msg.type === "clients"){
                 const d = msg.data || {};
-                if (clientsEl) clientsEl.textContent = `clients: ${d.clients}/${d.max}`;
+                if (typeof d.now === "number") serverTimeSkew = d.now - Date.now() / 1000;
+                if (clientsEl) clientsEl.textContent = `Clients: ${d.clients}/${d.max}`;
                 if (Array.isArray(d.list)){
                     mergeClientRoster(d.list);
                     if (isClientsOpen()) renderClientRoster();
                 }
+            }
+
+            if (msg.type === "cmd_ack"){
+                if (_cmdLock && (_cmdLock.expect === "state" || _cmdLock.expect === "nav")) _unlockCommand();
+                return;
             }
 
             if (msg.type === "nickname_ok"){
@@ -2783,12 +2835,14 @@ function connectWS(){
                 }
                 const knownErrors = {
                     "seeking not allowed": "Seeking is disabled",
+                    "nothing is loaded": "Nothing is loaded",
+                    "nothing to skip to": "Nothing to skip to",
                     "playlist control not allowed": "Playlist control is disabled",
                     "id required": "Something went wrong",
                     "val required": "Something went wrong",
                     "unknown op": "Something went wrong",
                 };
-                const friendly = knownErrors[msg.message] ?? "VLC is not responding";
+                const friendly = knownErrors[msg.message] ?? "Something went wrong";
                 showToast(friendly, "err");
                 console.warn("cmd_error", msg);
                 return;
@@ -2797,7 +2851,7 @@ function connectWS(){
             if (msg.type === "shutdown"){
                 const reasons = {
                     stopped: "Host stopped the session",
-                    crashed: "Host crashed unexpectedly",
+                    crashed: "The host's VLC Control crashed",
                 };
                 shutdownNotified = true;
                 showToast(reasons[msg.reason] || "Host disconnected", "err", Infinity);

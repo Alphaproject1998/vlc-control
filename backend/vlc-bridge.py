@@ -1,13 +1,20 @@
+"""
+VLC Control bridge - Flask HTTP API + WebSocket broadcaster in front of VLC's HTTP interface.
+Run with --tail to render EVENT lines from the log file as readable console output instead.
+"""
+
 from __future__ import annotations
 
 from flask import Flask, request, abort, send_from_directory, jsonify
 from flask_sock import Sock
 import os
+import re
 import sys
 import time
 import json
 import random
 import signal
+import logging
 import threading
 import requests
 import secrets
@@ -20,6 +27,9 @@ except ImportError:
         import tomli as tomllib  # type: ignore[no-redef]
     except ImportError:
         tomllib = None  # type: ignore[assignment]
+
+
+VERSION = "0.5.0"
 
 
 def _load_config() -> dict:
@@ -39,6 +49,48 @@ def _load_config() -> dict:
     return {}
 
 
+def _read_commit() -> str:
+    state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "install-state.json")
+    try:
+        with open(state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return ""
+    commit = str(state.get("commit") or "")
+    if commit and state.get("dirty"):
+        commit += "+"
+    return commit
+
+
+_ACTOR_IDENTITY = {"host": "Host", "vlc": "VLC", "system": "System"}
+_ERROR_REASONS = {
+    "seeking_not_allowed": "seeking is disabled",
+    "playlist_control_not_allowed": "playlist control is disabled",
+    "nothing_loaded": "nothing is loaded",
+    "nothing_to_skip_to": "nothing to skip to",
+    "unknown_op": "unknown command",
+}
+_ERROR_OPS = {
+    "toggle": "use play/pause",
+    "stop": "stop playback",
+    "next": "skip forward",
+    "prev": "skip back",
+    "seek": "seek",
+    "playlist/play": "play an item",
+    "playlist/remove": "remove an item",
+    "playlist/clear": "clear the playlist",
+    "set_nickname": "set a nickname",
+}
+_VLC_FAULTS = {
+    "ConnectionError": "nothing is listening on the VLC port",
+    "ConnectTimeout": "no answer from VLC",
+    "ReadTimeout": "VLC took too long to answer",
+    "Timeout": "VLC took too long to answer",
+    "HTTPError": "VLC turned the request down, check vlc_pass",
+    "JSONDecodeError": "VLC sent back something unreadable",
+}
+
+
 def _tail_format(line: str) -> str | None:
     parts = line.strip().split(" ")
     if len(parts) < 3 or parts[2] != "EVENT":
@@ -54,7 +106,7 @@ def _tail_format(line: str) -> str | None:
 
     etype = kv.get("type", "")
     who = kv.get("who", "")
-    identity = unquote(kv.get("identity") or ("Host" if who == "host" else kv.get("cid", "?")))
+    identity = unquote(kv.get("identity") or _ACTOR_IDENTITY.get(who) or kv.get("cid", "?"))
     op = kv.get("op", "")
     value = unquote(kv.get("value", ""))
     at = unquote(kv.get("at", ""))
@@ -64,43 +116,78 @@ def _tail_format(line: str) -> str | None:
     def out(tag: str, msg: str) -> str:
         return f"[{time_str}] [{tag}] {msg}"
 
+    def unrendered() -> str | None:
+        if os.environ.get("VLC_CONTROL_TAIL_DEBUG"):
+            return out("?", " ".join(parts[3:]))
+        return None
+
+    if etype == "startup":
+        return None
+    if etype == "shutdown":
+        return out("!", "VLC Control crashed" if reason == "crashed" else "Session stopped")
     if etype == "client_join":
         if reason == "rejoin-reserved":
             return out("+", f"{identity} reconnected")
         return out("+", f"{identity} joined")
     if etype == "client_leave":
-        return out("-", f"{identity} left")
+        held = kv.get("reserved_for", "")
+        return out("-", f"{identity} left (seat held for {held}s)" if held else f"{identity} left")
+    if etype == "seat_expired":
+        return out("-", f"{identity}'s seat expired and is free again")
     if etype == "client_reject":
-        return out("!", f"{identity} was rejected - server full ({kv.get('clients', '?')}/{kv.get('max', '?')})")
+        return out("!", f"{identity} couldn't join - all {kv.get('max', '?')} seats taken")
     if etype == "cmd_error":
-        return out("!", f"{identity} tried to {op} - {reason}")
+        detail = _ERROR_REASONS.get(reason) or _VLC_FAULTS.get(reason) or "VLC wouldn't take the command"
+        return out("!", f"{identity} tried to {_ERROR_OPS.get(op, op)} - {detail}")
     if etype == "nickname_set":
-        old = unquote(kv.get("old", ""))
-        new = unquote(kv.get("new", ""))
-        return out("*", f"{identity} changed nickname: {old} -> {new}")
+        return out("*", f"{unquote(kv.get('old', ''))} is now known as {unquote(kv.get('new', ''))}")
+    if etype == "nickname_clear":
+        return out("*", f"{identity} cleared their nickname (now {unquote(kv.get('new', ''))})")
+    if etype == "vlc_lost":
+        detail = _VLC_FAULTS.get(reason) or reason
+        return out("~", f"VLC stopped responding - {detail}" if detail else "VLC stopped responding")
+    if etype == "vlc_back":
+        return out("~", "VLC is responding again")
     if etype != "action":
-        return None
+        return unrendered()
 
-    if op in ("play", "paused", "stopped", "stop"):
-        verb = {"play": "resumed", "paused": "paused", "stopped": "stopped", "stop": "stopped"}[op]
-        return out("*", f"{identity} {verb} playback")
+    tag = "~" if who in ("vlc", "system") else "*"
+
+    if op in ("play", "resume", "paused", "stopped", "stop"):
+        verb = {"play": "started", "resume": "resumed", "paused": "paused",
+                "stopped": "stopped", "stop": "stopped"}[op]
+        return out(tag, f"{identity} {verb} playback")
     if op == "seek":
         detail = f"{at} / {length}" if at else value
-        return out("*", f"{identity} seeked to {detail}")
+        return out(tag, f"{identity} seeked to {detail}")
     if op in ("next", "prev"):
-        return out("*", f"{identity} skipped to {'next' if op == 'next' else 'previous'} track")
+        direction = "next" if op == "next" else "previous"
+        named = f": \"{value}\"" if value else ""
+        return out(tag, f"{identity} skipped to {direction} track{named}")
     if op == "track_change":
-        return out("*", f"{identity} changed track to \"{value}\"")
+        return out(tag, f"{identity} changed track to \"{value}\"")
+    if op == "auto_next":
+        return out(tag, f"{identity} advanced to \"{value}\"")
+    if op == "restart":
+        return out(tag, f"{identity} restarted \"{value}\"")
+    if op == "loop_restart":
+        return out(tag, f"{identity} looped back to the start of \"{value}\"")
+    if op == "playlist_end":
+        return out(tag, f"{identity} reached the end of the playlist")
     if op == "files_add":
-        return out("*", f"Playlist updated: {identity} added \"{value}\"")
+        return out(tag, f"{identity} added \"{value}\" to the playlist")
+    if op == "files_add_many":
+        return out(tag, f"{identity} added {value} files to the playlist")
     if op in ("files_play", "files_play_existing", "files_play_resume",
               "files_play_resume_existing", "playlist_skip", "playlist_resume"):
-        return out("*", f"Playlist updated: {identity} switched to \"{value}\"")
+        return out(tag, f"{identity} switched to \"{value}\"")
     if op == "playlist_remove":
-        return out("*", f"Playlist updated: {identity} removed \"{value}\"")
+        return out(tag, f"{identity} removed \"{value}\" from the playlist")
+    if op == "playlist_remove_many":
+        return out(tag, f"{identity} removed {value} files from the playlist")
     if op == "playlist_clear":
-        return out("*", f"Playlist updated: {identity} cleared the playlist")
-    return None
+        return out(tag, f"{identity} cleared the playlist")
+    return unrendered()
 
 
 def _run_tail_mode() -> None:
@@ -120,6 +207,8 @@ _SYS = _CFG.get("system", {})
 _FB = _CFG.get("file_browse", {})
 _FEAT = _CFG.get("features", {})
 
+APP_COMMIT = _read_commit()
+
 TOKEN = os.environ.get("TOKEN", "")
 
 _vlc_host = str(_SYS.get("vlc_host", "127.0.0.1"))
@@ -131,6 +220,41 @@ MAX_CLIENTS = int(os.environ.get("MAX_CLIENTS") or _SYS.get("max_clients", 2))
 GRACE_SECONDS = float(os.environ.get("GRACE_SECONDS") or _SYS.get("grace_seconds", 30))
 
 LOG_WHEN_IDLE: bool = bool(_SYS.get("log_when_idle", False))
+
+HTTP_ACCESS_LOG: bool = bool(_SYS.get("http_access_log", False))
+LOG_DIR = os.environ.get("LOG_DIR") or str(_SYS.get("log_dir", "/tmp"))
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+class _PlainFormatter(logging.Formatter):
+    # werkzeug colours request lines whether or not the destination is a terminal
+    def format(self, record: logging.LogRecord) -> str:
+        return _ANSI_RE.sub("", super().format(record))
+
+
+def _setup_access_log() -> None:
+    werkzeug_logger = logging.getLogger("werkzeug")
+    werkzeug_logger.propagate = False
+    access_path = os.path.join(LOG_DIR, "vlc-access.log")
+    if not HTTP_ACCESS_LOG:
+        werkzeug_logger.setLevel(logging.ERROR)
+        try:
+            os.remove(access_path)
+        except OSError:
+            pass
+        return
+    try:
+        handler = logging.FileHandler(access_path, mode="w")
+    except OSError:
+        werkzeug_logger.propagate = True
+        return
+    handler.setFormatter(_PlainFormatter("%(message)s"))
+    werkzeug_logger.addHandler(handler)
+    werkzeug_logger.setLevel(logging.INFO)
+
+
+_setup_access_log()
 
 CLIENT_ID_STYLE = str(_SYS.get("client_id_style", "numeric")).strip().lower()
 ACTION_DEBOUNCE_MS = int(_SYS.get("action_debounce_ms", 250))
@@ -239,6 +363,7 @@ def _build_frontend_config(cfg: dict) -> dict:
     features = dict(cfg.get("features", {}))
     features["file_browser"] = _FB.get("enabled", False)
     raw = {
+        "version": VERSION,
         "title": ui.get("title", "VLC Control"),
         "subtitle": ui.get("subtitle", ""),
         "footer_text": ui.get("footer_text", ""),
@@ -258,13 +383,16 @@ sock = Sock(app)
 
 _active: dict[str, set] = {}          # cid -> set(ws)
 _reserved: dict[str, float] = {}      # cid -> expires_at
-_client_meta: dict[str, dict] = {}    # cid -> {nickname, ip, joined_at, number}
+_rejected_logged: set[str] = set()    # cids already logged as turned away, cleared once admitted
+_client_meta: dict[str, dict] = {}    # cid -> {nickname, ip, joined_at, left_at, number}
 _client_number_counter = 0
 _lock = threading.Lock()
 
 _action_buffers: dict[str, dict] = {}  # op -> {baseline, candidates, timer}
 _action_buffers_lock = threading.Lock()
 _DEBOUNCE_OPS = {"toggle": "pl_pause", "stop": "pl_stop"}
+
+_NEEDS_MEDIA_OPS = frozenset({"toggle", "stop", "next", "prev", "seek"})
 
 _sessions: dict[str, tuple] = {}      # sid -> (ws, cid)
 _sessions_lock = threading.Lock()
@@ -277,10 +405,35 @@ _TRACK_OPS = frozenset({
     "files_play_resume", "files_play_resume_existing",
 })
 
+_PLAYBACK_MASK_OPS = _TRACK_OPS | {"playlist_clear", "playlist_remove"}
+_SEEK_MASK_OPS = frozenset({
+    "seek", "playlist_resume", "files_play_resume", "files_play_resume_existing",
+})
+_RESTART_MASK_OPS = _TRACK_OPS | {"restart"}
+
+
+def _playback_op(prev_state: str, new_state: str) -> str:
+    if new_state != "playing":
+        return new_state
+    return "resume" if prev_state == "paused" else "play"
+
 
 def _set_pending(op: str, cid: str, value: str | None = None, target_sec: int | None = None) -> None:
     global _pending_action
-    _pending_action = {"op": op, "cid": cid, "value": value, "target_sec": target_sec, "at": time.time()}
+    _pending_action = {"op": op, "cid": cid, "value": value, "target_sec": target_sec, "at": time.monotonic()}
+
+
+def _clear_pending() -> None:
+    global _pending_action
+    _pending_action = None
+
+
+def _vlc_get_pending(path: str, **kwargs):
+    try:
+        return vlc_get(path, **kwargs)
+    except Exception:
+        _clear_pending()
+        raise
 
 
 def _ws_err(ws, op: str, msg: str) -> None:
@@ -318,11 +471,22 @@ def _now() -> float:
     return time.time()
 
 
+def _reserve_seat_locked(cid: str) -> None:
+    if GRACE_SECONDS <= 0:
+        return
+    _reserved[cid] = time.monotonic() + GRACE_SECONDS
+    meta = _client_meta.get(cid)
+    if meta is not None:
+        meta["left_at"] = _now()
+
+
 def _cleanup_reserved_locked(now: float) -> None:
     expired = [cid for cid, exp in _reserved.items() if exp <= now]
     for cid in expired:
+        identity = _client_identity_locked(cid)
         _reserved.pop(cid, None)
         _client_meta.pop(cid, None)
+        log_event("seat_expired", cid=cid, identity=identity)
 
 
 def _client_real_ip() -> str:
@@ -371,7 +535,12 @@ def _client_identity(cid: str) -> str:
 def _log_client_leave(cid: str) -> None:
     with _lock:
         identity = _client_identity_locked(cid)
-    log_event("client_leave", cid=cid, identity=identity, reserved_for=int(GRACE_SECONDS))
+        if GRACE_SECONDS <= 0:
+            _client_meta.pop(cid, None)
+    if GRACE_SECONDS <= 0:
+        log_event("client_leave", cid=cid, identity=identity)
+    else:
+        log_event("client_leave", cid=cid, identity=identity, reserved_for=int(GRACE_SECONDS))
 
 
 def _client_roster_locked() -> list[dict]:
@@ -391,8 +560,9 @@ def _client_roster_locked() -> list[dict]:
             "joined_at": meta.get("joined_at", now),
         }
         if cid in _reserved:
-            entry["reserved_until"] = _reserved[cid]
-            entry["left_at"] = _reserved[cid] - GRACE_SECONDS
+            left_at = meta.get("left_at", now)
+            entry["left_at"] = left_at
+            entry["reserved_until"] = left_at + GRACE_SECONDS
         roster.append(entry)
     return roster
 
@@ -417,13 +587,25 @@ def _can_admit_locked(cid: str, now: float) -> tuple[bool, str]:
     _cleanup_reserved_locked(now)
 
     if cid in _active:
+        _rejected_logged.discard(cid)
         return True, "already-active"
     if cid in _reserved:
+        _rejected_logged.discard(cid)
         return True, "rejoin-reserved"
     if (len(_active) + len(_reserved)) < MAX_CLIENTS:
+        _rejected_logged.discard(cid)
         return True, "new-seat"
 
     return False, "server full"
+
+
+def _log_reject_once_locked(cid: str, occupied_count: int, cooldown: int) -> None:
+    if cid in _rejected_logged:
+        return
+    _rejected_logged.add(cid)
+    identity = _client_identity_locked(cid) if cid in _client_meta else _client_real_ip()
+    log_event("client_reject", cid=cid, identity=identity, reason="server_full",
+              clients=occupied_count, max=MAX_CLIENTS, cooldown=cooldown)
 
 
 def require_sid() -> tuple[str, str]:
@@ -462,7 +644,7 @@ def _ws_send_safe(ws, payload: str) -> bool:
 
 
 def broadcast_clients() -> None:
-    now = _now()
+    now = time.monotonic()
     with _lock:
         occupied_count = _occupied_count_locked(now)
         payload = json.dumps({
@@ -473,6 +655,7 @@ def broadcast_clients() -> None:
                 "open": occupied_count < MAX_CLIENTS,
                 "cooldown": _seconds_until_next_seat_opens_locked(now),
                 "grace": int(GRACE_SECONDS),
+                "now": _now(),
                 "list": _client_roster_locked(),
             }
         })
@@ -496,7 +679,7 @@ def broadcast_clients() -> None:
                     ws_set.discard(w)
             if len(ws_set) == 0:
                 _active.pop(cid, None)
-                _reserved[cid] = _now() + GRACE_SECONDS
+                _reserve_seat_locked(cid)
                 left_cids.append(cid)
 
     for cid in left_cids:
@@ -527,7 +710,9 @@ def _handle_stop_signal(signum, frame) -> None:
         _shutdown_broadcast_done = True
         log_event("shutdown", reason="stopped")
         broadcast_shutdown("stopped")
-    sys.exit(0)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def _handle_uncaught(exc_type, exc_value, exc_tb) -> None:
@@ -657,7 +842,9 @@ def _apply_progress(items: list[dict]) -> list[dict]:
 
 
 _last_seen: dict | None = None
-_last_seen_wall_time: float | None = None
+_last_seen_mono: float | None = None
+_vlc_reachable: bool = True
+_vlc_lost_reason: str = ""
 _last_playlist_json: str | None = None
 _last_playlist: list[dict] = []
 _current_playing_dir_cache: str | None = None
@@ -674,7 +861,7 @@ def _note_auto_miss(reason: str, **kv) -> None:
 
 
 def broadcaster_loop() -> None:
-    global _last_seen, _last_seen_wall_time, _last_playlist_json, _last_playlist, _current_playing_dir_cache, _pending_action
+    global _last_seen, _last_seen_mono, _last_playlist_json, _last_playlist, _current_playing_dir_cache, _pending_action, _vlc_reachable, _vlc_lost_reason
 
     while True:
         time.sleep(0.75)
@@ -683,63 +870,118 @@ def broadcaster_loop() -> None:
             all_ws = []
             for ws_set in _active.values():
                 all_ws.extend(list(ws_set))
+            seat_expiring = any(exp <= time.monotonic() for exp in _reserved.values())
+
+        if seat_expiring:
+            broadcast_clients()
 
         if not all_ws and not LOG_WHEN_IDLE:
             _last_seen = None
-            _last_seen_wall_time = None
+            _last_seen_mono = None
             continue
 
         status: dict | None = None
-        tick_wall_time = time.time()
         try:
             status = read_status_dict()
+            tick_mono = time.monotonic()
+            if not _vlc_reachable:
+                _vlc_reachable = True
+                _vlc_lost_reason = ""
+                log_event("vlc_back")
 
             if _last_seen is not None:
-                elapsed = tick_wall_time - (_last_seen_wall_time or tick_wall_time)
+                elapsed = tick_mono - (_last_seen_mono or tick_mono)
                 pending = _pending_action
-                if pending is not None and (time.time() - pending.get("at", 0)) > 10.0:
+                if pending is not None and (time.monotonic() - pending.get("at", 0)) > 10.0:
                     _pending_action = None
                     pending = None
 
                 prev_state = (_last_seen.get("state") or "unknown")
                 new_state = (status.get("state") or "unknown")
+                prev_title = (_last_seen.get("title") or "")
+                new_title = (status.get("title") or "")
+                prev_time = int(_last_seen.get("time") or 0)
+                new_time = int(status.get("time") or 0)
+                prev_length = int(_last_seen.get("length") or 0)
+
+                near_end = prev_length > 0 and (prev_length - prev_time) <= 2
+                track_changed = bool(new_title and new_title != prev_title and new_state != "stopped")
+                restarted = (not track_changed and new_state == prev_state
+                             and new_time <= 2 and new_time < prev_time)
+
                 suppress_secondary = False
+                resumed_from_stopped = prev_state == "stopped" and new_state != "stopped"
                 if new_state != prev_state:
                     if pending and pending["op"] == "toggle":
                         cid_log = pending["cid"]
                         _pending_action = None
                         pending = None
+                        suppress_secondary = resumed_from_stopped
                         log_event("action", who="web", cid=cid_log, identity=_client_identity(cid_log),
-                                  op=("play" if new_state == "playing" else new_state))
+                                  op=_playback_op(prev_state, new_state))
                     elif pending and pending["op"] == "stop":
                         _pending_action = None
                         pending = None
                         suppress_secondary = True
-                    elif pending:
-                        pass
+                    elif pending and pending["op"] in _PLAYBACK_MASK_OPS:
+                        if pending["op"] in ("playlist_remove", "playlist_clear"):
+                            _pending_action = None
+                            pending = None
+                    elif new_state == "stopped" and prev_state == "playing" and near_end:
+                        log_event("action", who="vlc", identity="VLC", op="playlist_end")
+                        suppress_secondary = True
                     else:
+                        suppress_secondary = resumed_from_stopped
                         log_event("action", who="host", identity="Host",
-                                  op=("play" if new_state == "playing" else new_state))
+                                  op=_playback_op(prev_state, new_state))
 
-                prev_title = (_last_seen.get("title") or "")
-                new_title = (status.get("title") or "")
-                if not suppress_secondary and new_title and new_title != prev_title:
+                if not suppress_secondary and track_changed:
                     if pending and pending["op"] in _TRACK_OPS:
+                        skip_cid = pending["cid"] if pending["op"] in ("next", "prev") else None
+                        skip_op = pending["op"]
                         _pending_action = None
                         pending = None
+                        if skip_cid:
+                            log_event("action", who="web", cid=skip_cid, identity=_client_identity(skip_cid),
+                                      op=skip_op, value=new_title)
+                    elif pending and pending["op"] in _PLAYBACK_MASK_OPS:
+                        pass
+                    elif near_end:
+                        log_event("action", who="vlc", identity="VLC", op="auto_next", value=new_title)
                     else:
                         log_event("action", who="host", identity="Host", op="track_change", value=new_title)
 
-                prev_time = int(_last_seen.get("time") or 0)
-                new_time = int(status.get("time") or 0)
+                if not suppress_secondary and restarted:
+                    if pending and pending["op"] in _RESTART_MASK_OPS:
+                        skip_cid = pending["cid"] if pending["op"] in ("next", "prev") else None
+                        skip_op = pending["op"]
+                        _pending_action = None
+                        pending = None
+                        if skip_cid:
+                            log_event("action", who="web", cid=skip_cid, identity=_client_identity(skip_cid),
+                                      op=skip_op, value=new_title)
+                    elif pending and pending["op"] in _SEEK_MASK_OPS:
+                        _pending_action = None
+                        pending = None
+                    elif near_end:
+                        log_event("action", who="vlc", identity="VLC", op="loop_restart", value=new_title)
+                    elif len(_last_playlist) == 1 and new_title:
+                        log_event("action", who="host", identity="Host", op="restart", value=new_title)
+                    else:
+                        at_s = format_time(new_time)
+                        len_s = format_time(int(status.get("length") or 0))
+                        log_event("action", who="host", identity="Host", op="seek",
+                                  at=at_s, length=len_s, value=f"{at_s}/{len_s}")
+
                 expected_time = prev_time + elapsed if new_state == "playing" else prev_time
-                if not suppress_secondary and abs(new_time - expected_time) >= 3:
+                if (not suppress_secondary and not track_changed and not restarted
+                        and new_state != "stopped" and abs(new_time - expected_time) >= 3):
                     if pending and pending["op"] == "seek":
                         t = pending.get("target_sec")
                         if t is None or abs(new_time - t) <= 5:
                             _pending_action = None
                             pending = None
-                    elif pending:
+                    elif pending and pending["op"] in _SEEK_MASK_OPS:
                         pass
                     else:
                         length_s = int(status.get("length") or 0)
@@ -749,12 +991,17 @@ def broadcaster_loop() -> None:
                                   at=at_s, length=len_s, value=f"{at_s}/{len_s}")
 
             _last_seen = status
-            _last_seen_wall_time = tick_wall_time
+            _last_seen_mono = tick_mono
             payload = json.dumps({"type": "status", "data": status})
 
-        except Exception:
+        except Exception as exc:
             _last_seen = None
-            _last_seen_wall_time = None
+            _last_seen_mono = None
+            lost_reason = type(exc).__name__
+            if _vlc_reachable or lost_reason != _vlc_lost_reason:
+                _vlc_reachable = False
+                _vlc_lost_reason = lost_reason
+                log_event("vlc_lost", reason=lost_reason)
             payload = json.dumps({
                 "type": "status",
                 "data": {
@@ -847,6 +1094,19 @@ def status():
     return jsonify(read_status_dict())
 
 
+def _skip_is_dead_end(op: str) -> bool:
+    if bool((_last_seen or {}).get("loop")):
+        return False
+    index = next((i for i, item in enumerate(_last_playlist) if item.get("isCurrent")), -1)
+    if index < 0:
+        return False
+    return index == 0 if op == "prev" else index == len(_last_playlist) - 1
+
+
+def _removes_current(items: list[dict], ids: list[str]) -> bool:
+    return any(item.get("isCurrent") and str(item.get("id") or "") in ids for item in items)
+
+
 def _playlist_name_for_id(items: list[dict], playlist_id: str) -> str:
     for item in items:
         if item.get("id") == playlist_id:
@@ -867,16 +1127,37 @@ def playlist_remove():
     _, cid = require_sid()
     require_playlist_control()
 
-    playlist_id = str((request.json or {}).get("id", "")).strip()
-    if not playlist_id:
+    body = request.json or {}
+    raw_ids = body.get("ids")
+    if raw_ids is None:
+        raw_ids = [body.get("id", "")]
+    ids = [str(i).strip() for i in raw_ids if str(i).strip()]
+    if not ids:
         abort(400, "Missing id")
 
-    name = _playlist_name_for_id(_last_playlist, playlist_id)
+    names = {playlist_id: _playlist_name_for_id(_last_playlist, playlist_id) for playlist_id in ids}
+    masking = _removes_current(_last_playlist, ids)
+    if masking:
+        _set_pending("playlist_remove", cid, value=ids[-1])
 
-    vlc_get("/requests/status.xml", params={"command": "pl_delete", "id": playlist_id})
-    _set_pending("playlist_remove", cid, value=playlist_id)
-    log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="playlist_remove", value=(name or playlist_id))
-    return "ok"
+    removed, failed = [], []
+    for playlist_id in ids:
+        try:
+            vlc_get("/requests/status.xml", params={"command": "pl_delete", "id": playlist_id})
+            removed.append(playlist_id)
+        except Exception:
+            failed.append(playlist_id)
+
+    if not removed and masking:
+        _clear_pending()
+    elif len(removed) == 1:
+        log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="playlist_remove",
+                  value=(names[removed[0]] or removed[0]))
+    else:
+        log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="playlist_remove_many",
+                  value=len(removed))
+
+    return jsonify({"removed": removed, "failed": failed})
 
 
 def _require_file_browse() -> None:
@@ -1060,18 +1341,25 @@ def files_list():
     })
 
 
+def _resolve_file_path(root_id: str, rel: str) -> str | None:
+    root_info = _resolve_root(root_id)
+    if not root_info:
+        return None
+    _label, root, recursive = root_info
+
+    full = _safe_join(root, rel, allow_sub=recursive)
+    if full is None or not os.path.isfile(full) or not _ext_allowed(os.path.basename(full)):
+        return None
+    return full
+
+
 def _resolve_file_arg() -> tuple[str, str, str]:
     body = request.json or {}
     root_id = str(body.get("root", "")).strip()
     rel = str(body.get("path", "")).strip()
 
-    root_info = _resolve_root(root_id)
-    if not root_info:
-        abort(404)
-    _label, root, recursive = root_info
-
-    full = _safe_join(root, rel, allow_sub=recursive)
-    if full is None or not os.path.isfile(full) or not _ext_allowed(os.path.basename(full)):
+    full = _resolve_file_path(root_id, rel)
+    if full is None:
         abort(404)
 
     return root_id, rel, full
@@ -1091,18 +1379,42 @@ def files_add():
     _, cid = require_sid()
     _require_file_browse()
 
-    root_id, rel, full = _resolve_file_arg()
-    uri = _path_to_uri(full)
+    body = request.json or {}
+    root_id = str(body.get("root", "")).strip()
+    raw_paths = body.get("paths")
+    if raw_paths is None:
+        raw_paths = [body.get("path", "")]
+    rels = [str(p).strip() for p in raw_paths if str(p).strip()]
+    if not rels:
+        abort(400, "Missing path")
 
-    existing = _playlist_find_by_uri(uri)
-    if existing:
-        return jsonify({"status": "already_present", "id": existing})
+    added, already, failed = [], [], []
+    last_full = ""
+    for rel in rels:
+        full = _resolve_file_path(root_id, rel)
+        if full is None:
+            failed.append(rel)
+            continue
+        uri = _path_to_uri(full)
+        if _playlist_find_by_uri(uri):
+            already.append(rel)
+            continue
+        try:
+            vlc_get("/requests/status.xml", params={"command": "in_enqueue", "input": uri})
+        except Exception:
+            failed.append(rel)
+            continue
+        added.append(rel)
+        last_full = full
 
-    vlc_get("/requests/status.xml", params={"command": "in_enqueue", "input": uri})
-    _set_pending("files_add", cid, value=rel)
-    log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="files_add",
-              value=_log_file_value(root_id, rel, full))
-    return jsonify({"status": "added"})
+    if len(added) == 1:
+        log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="files_add",
+                  value=_log_file_value(root_id, added[0], last_full))
+    elif added:
+        log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="files_add_many",
+                  value=len(added))
+
+    return jsonify({"added": added, "already": already, "failed": failed})
 
 
 @app.post("/api/files/play")
@@ -1126,28 +1438,32 @@ def files_play():
 
     existing = _playlist_find_by_uri(uri)
     if existing:
-        vlc_get("/requests/status.xml", params={"command": "pl_play", "id": existing})
+        if resume_at > 0:
+            _set_pending("files_play_resume_existing", cid=cid, value=f"{existing}@{resume_at}")
+        else:
+            _set_pending("files_play_existing", cid=cid, value=existing)
+        _vlc_get_pending("/requests/status.xml", params={"command": "pl_play", "id": existing})
         if resume_at > 0:
             time.sleep(0.25)
-            vlc_get("/requests/status.xml", params={"command": "seek", "val": str(resume_at)})
-            _set_pending("files_play_resume_existing", cid=cid, value=f"{existing}@{resume_at}")
+            _vlc_get_pending("/requests/status.xml", params={"command": "seek", "val": str(resume_at)})
             log_event("action", who="web", cid=cid, identity=identity, op="files_play_resume_existing",
                       at=format_time(resume_at), value=f"{os.path.basename(full)} - {format_time(resume_at)}")
         else:
-            _set_pending("files_play_existing", cid=cid, value=existing)
             log_event("action", who="web", cid=cid, identity=identity, op="files_play_existing",
                       value=os.path.basename(full))
         return jsonify({"status": "jumped", "id": existing})
 
-    vlc_get("/requests/status.xml", params={"command": "in_play", "input": uri})
+    if resume_at > 0:
+        _set_pending("files_play_resume", cid=cid, value=f"{rel}@{resume_at}")
+    else:
+        _set_pending("files_play", cid=cid, value=rel)
+    _vlc_get_pending("/requests/status.xml", params={"command": "in_play", "input": uri})
     if resume_at > 0:
         time.sleep(0.25)
-        vlc_get("/requests/status.xml", params={"command": "seek", "val": str(resume_at)})
-        _set_pending("files_play_resume", cid=cid, value=f"{rel}@{resume_at}")
+        _vlc_get_pending("/requests/status.xml", params={"command": "seek", "val": str(resume_at)})
         log_event("action", who="web", cid=cid, identity=identity, op="files_play_resume",
                   at=format_time(resume_at), value=f"{_log_file_value(root_id, rel, full)} - {format_time(resume_at)}")
     else:
-        _set_pending("files_play", cid=cid, value=rel)
         log_event("action", who="web", cid=cid, identity=identity, op="files_play",
                   value=_log_file_value(root_id, rel, full))
     return jsonify({"status": "added_and_played"})
@@ -1158,7 +1474,7 @@ def clients():
     require_token()
     cid = request.args.get("cid", "").strip()
 
-    now = _now()
+    now = time.monotonic()
     with _lock:
         occupied_count = _occupied_count_locked(now)
         cooldown = _seconds_until_next_seat_opens_locked(now)
@@ -1168,18 +1484,21 @@ def clients():
             "open": occupied_count < MAX_CLIENTS,
             "cooldown": cooldown,
             "grace": int(GRACE_SECONDS),
+            "now": _now(),
         }
 
         if cid:
             ok, reason = _can_admit_locked(cid, now)
             response["admit_for_cid"] = bool(ok)
             response["reason"] = reason
+            if not ok:
+                _log_reject_once_locked(cid, occupied_count, cooldown)
 
     return jsonify(response)
 
 
 def _resolve_action_buffer(op: str, vlc_command: str) -> None:
-    global _last_seen, _last_seen_wall_time
+    global _last_seen, _last_seen_mono
 
     with _action_buffers_lock:
         buf = _action_buffers.pop(op, None)
@@ -1200,22 +1519,24 @@ def _resolve_action_buffer(op: str, vlc_command: str) -> None:
     )
 
     if host_acted:
-        log_event("action", who="host", identity="Host",
-                  op=("play" if current.get("state") == "playing" else current.get("state")))
-        _last_seen = current
-        _last_seen_wall_time = time.time()
+        if _last_seen is None or _last_seen.get("state") != current.get("state"):
+            log_event("action", who="host", identity="Host",
+                      op=_playback_op(baseline.get("state") or "", current.get("state") or ""))
+            _last_seen = current
+            _last_seen_mono = time.monotonic()
         for extra_cid in candidates:
             log_event("action_dropped", cid=extra_cid, op=op, reason="host_preempted")
         return
 
     winner = random.choice(candidates)
+    _set_pending(op, winner)
     try:
         vlc_cmd(vlc_command)
     except Exception as exc:
-        log_event("cmd_error", cid=winner, op=op, reason=str(exc))
+        _clear_pending()
+        log_event("cmd_error", cid=winner, identity=_client_identity(winner), op=op, reason=str(exc))
         return
 
-    _set_pending(op, winner)
     if op == "stop":
         log_event("action", who="web", cid=winner, identity=_client_identity(winner), op="stop")
     for extra_cid in candidates:
@@ -1225,8 +1546,8 @@ def _resolve_action_buffer(op: str, vlc_command: str) -> None:
 
 def _debounced_dispatch(cid: str, op: str, vlc_command: str) -> None:
     if ACTION_DEBOUNCE_MS <= 0:
-        vlc_cmd(vlc_command)
         _set_pending(op, cid)
+        vlc_cmd(vlc_command)
         if op == "stop":
             log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="stop")
         return
@@ -1238,10 +1559,12 @@ def _debounced_dispatch(cid: str, op: str, vlc_command: str) -> None:
                 buf["candidates"].append(cid)
             return
 
-        try:
-            baseline = read_status_dict()
-        except Exception:
-            baseline = None
+        baseline = _last_seen
+        if baseline is None:
+            try:
+                baseline = read_status_dict()
+            except Exception:
+                baseline = None
 
         buf = {"baseline": baseline, "candidates": [cid]}
         _action_buffers[op] = buf
@@ -1253,18 +1576,24 @@ def _debounced_dispatch(cid: str, op: str, vlc_command: str) -> None:
 def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
     op = str(data.get("op") or "").strip()
     try:
+        if op in _NEEDS_MEDIA_OPS and _last_seen is not None and not _last_playlist:
+            log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="nothing_loaded")
+            _ws_err(ws, op, "nothing is loaded"); return
+
         if op in _DEBOUNCE_OPS:
             _debounced_dispatch(cid, op, _DEBOUNCE_OPS[op])
 
-        elif op == "next":
-            vlc_cmd("pl_next")
-            _set_pending("next", cid)
-            log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="next")
-
-        elif op == "prev":
-            vlc_cmd("pl_previous")
-            _set_pending("prev", cid)
-            log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="prev")
+        elif op in ("next", "prev"):
+            looping_single = len(_last_playlist) == 1 and bool((_last_seen or {}).get("loop"))
+            if not looping_single and _skip_is_dead_end(op):
+                log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="nothing_to_skip_to")
+                _ws_err(ws, op, "nothing to skip to"); return
+            logged_op = "restart" if looping_single else op
+            _set_pending(logged_op, cid)
+            vlc_cmd("pl_next" if op == "next" else "pl_previous")
+            if looping_single:
+                log_event("action", who="web", cid=cid, identity=_client_identity(cid), op=logged_op,
+                          value=(_last_seen or {}).get("title"))
 
         elif op == "set_nickname":
             nickname = str(data.get("nickname") or "").strip()[:NICKNAME_MAX_LENGTH]
@@ -1287,7 +1616,8 @@ def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
                     new_display = nickname or fallback
                 meta["nickname"] = nickname or None
             if changed:
-                log_event("nickname_set", cid=cid, identity=old_display, old=old_display, new=new_display)
+                log_event("nickname_set" if nickname else "nickname_clear",
+                          cid=cid, identity=old_display, old=old_display, new=new_display)
             broadcast_clients()
             _ws_send_safe(ws, json.dumps({"type": "nickname_ok", "nickname": nickname}))
 
@@ -1299,8 +1629,12 @@ def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
             if not val:
                 _ws_err(ws, op, "val required"); return
 
-            target_sec = at_s = len_s = None
             seen = _last_seen
+            if seen is not None and (seen.get("length") or 0) <= 0:
+                log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="nothing_loaded")
+                _ws_err(ws, op, "nothing is loaded"); return
+
+            target_sec = at_s = len_s = None
             if seen:
                 try:
                     length = int(seen.get("length") or 0)
@@ -1318,8 +1652,8 @@ def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
                 except Exception:
                     pass
 
-            vlc_get("/requests/status.xml", params={"command": "seek", "val": val})
             _set_pending("seek", cid, value=val, target_sec=target_sec)
+            vlc_get("/requests/status.xml", params={"command": "seek", "val": val})
             log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="seek",
                       at=at_s, length=len_s, value=f"{at_s}/{len_s}" if at_s else val)
 
@@ -1367,8 +1701,9 @@ def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
             if not playlist_id:
                 _ws_err(ws, op, "id required"); return
             name = _playlist_name_for_id(_last_playlist, playlist_id)
+            if _removes_current(_last_playlist, [playlist_id]):
+                _set_pending("playlist_remove", cid, value=playlist_id)
             vlc_get("/requests/status.xml", params={"command": "pl_delete", "id": playlist_id})
-            _set_pending("playlist_remove", cid, value=playlist_id)
             log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="playlist_remove",
                       value=(name or playlist_id))
 
@@ -1376,15 +1711,18 @@ def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
             if not ALLOW_PLAYLIST_CONTROL:
                 log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="playlist_control_not_allowed")
                 _ws_err(ws, op, "playlist control not allowed"); return
-            vlc_get("/requests/status.xml", params={"command": "pl_empty"})
             _set_pending("playlist_clear", cid)
+            vlc_get("/requests/status.xml", params={"command": "pl_empty"})
             log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="playlist_clear")
 
         else:
             log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="unknown_op")
-            _ws_err(ws, op, "unknown op")
+            _ws_err(ws, op, "unknown op"); return
+
+        _ws_send_safe(ws, json.dumps({"type": "cmd_ack", "op": op}))
 
     except Exception as exc:
+        _clear_pending()
         log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason=str(exc))
         _ws_err(ws, op, str(exc))
 
@@ -1408,7 +1746,7 @@ def ws_route(ws):
 
     nickname_hint = request.args.get("nickname", "").strip()[:NICKNAME_MAX_LENGTH]
 
-    now = _now()
+    now = time.monotonic()
     with _lock:
         ok, reason = _can_admit_locked(cid, now)
         occupied_count = _occupied_count_locked(now)
@@ -1424,11 +1762,11 @@ def ws_route(ws):
                         "open": False,
                         "cooldown": cooldown,
                         "grace": int(GRACE_SECONDS),
+                        "now": _now(),
                     }
                 }))
                 ws.send(json.dumps({"type": "error", "message": "server full"}))
-                log_event("client_reject", cid=cid, identity=_client_identity_locked(cid), reason="server_full",
-                          clients=occupied_count, max=MAX_CLIENTS, cooldown=cooldown)
+                _log_reject_once_locked(cid, occupied_count, cooldown)
             except Exception:
                 pass
             return
@@ -1471,6 +1809,7 @@ def ws_route(ws):
                 "open": True,
                 "cooldown": 0,
                 "grace": int(GRACE_SECONDS),
+                "now": _now(),
                 "list": roster,
             }
         }))
@@ -1504,7 +1843,7 @@ def ws_route(ws):
                 ws_set.discard(ws)
                 if len(ws_set) == 0:
                     _active.pop(cid, None)
-                    _reserved[cid] = _now() + GRACE_SECONDS
+                    _reserve_seat_locked(cid)
                     left = True
 
         if left:
@@ -1517,11 +1856,14 @@ def ws_route(ws):
 
 
 def client_count_safe() -> int:
-    now = _now()
+    now = time.monotonic()
     with _lock:
         return _occupied_count_locked(now)
 
 
 if __name__ == "__main__":
     _port = int(_SYS.get("port", os.environ.get("PORT", "5000")))
+    log_event("startup", version=VERSION, commit=APP_COMMIT or None,
+              seats=MAX_CLIENTS, port=_port, debounce_ms=ACTION_DEBOUNCE_MS,
+              idle_logging=str(LOG_WHEN_IDLE).lower(), file_browse=str(FILE_BROWSE).lower())
     app.run(host="0.0.0.0", port=_port, threaded=True)

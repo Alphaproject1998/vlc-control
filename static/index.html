@@ -30,20 +30,20 @@
     <div class="content">
       <div id="nowPlaying">
         <div class="label">Now playing</div>
-        <div class="title" id="title">Waiting for a slot…</div>
+        <div class="title" id="title">Waiting for a seat…</div>
 
         <div class="seek-bar-wrap" id="seekBarWrap">
           <div class="seek-preview" id="seekPreview">Seek to 0:00</div>
           <input id="seekBar" type="range" min="0" max="1000" value="0" />
           <div id="nowPlayingMeta">
             <div class="chips">
-              <span class="chip" id="state">state: locked</span>
+              <span class="chip" id="state">Controls locked</span>
               <span class="chip" id="clock" title="Click to toggle remaining time" style="cursor:pointer;">0:00 / 0:00</span>
-              <span class="chip" id="playlistCountChip" title="0 in playlist" style="cursor:pointer;" hidden>0</span>
+              <span class="chip" id="playlistCountChip" title="0 items in the playlist" style="cursor:pointer;" hidden>0</span>
             </div>
             <div class="chips">
-              <span class="chip" id="clients" title="Click to view clients" style="cursor:pointer;">clients: ?/?</span>
-              <span class="chip" id="ws">ws: waiting</span>
+              <span class="chip" id="clients" title="Click to view clients" style="cursor:pointer;">Clients: ?/?</span>
+              <span class="chip" id="ws">Not connected</span>
             </div>
           </div>
         </div>
@@ -65,6 +65,7 @@
       </div>
 
       <div class="foot" id="footerText">Tip: keep the link private.</div>
+      <div class="foot version" id="appVersion" hidden></div>
     </div>
   </main>
 </div>
@@ -116,7 +117,7 @@
         </select>
       </div>
       <ul class="playlist-list file-browser-list" id="fileBrowserItems"></ul>
-      <div class="playlist-empty" id="fileBrowserEmpty">Nothing here.</div>
+      <div class="playlist-empty" id="fileBrowserEmpty">This folder is empty.</div>
     </div>
   </div>
 </div>

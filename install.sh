@@ -11,8 +11,9 @@ Installs into XDG locations by default:
 
 Use --prefix <path> to install everything under a custom directory instead.
 Use --log-dir <path> to set where log and pid files are written (default: /tmp).
+Use --help or -h for this message.
 
-Also optionally configures VLC HTTP control by updating vlcrc.
+Also optionally configures VLC HTTP control by updating vlcrc config files found on the machine.
 DOC
 
 APP_NAME="vlc-control"
@@ -27,6 +28,9 @@ DESKTOP_DIR="${XDG_DATA_HOME}/applications"
 DESKTOP_FILE="${DESKTOP_DIR}/vlc-control.desktop"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+APP_VERSION="$(sed -n 's/^VERSION = "\([^"]*\)".*/\1/p' "${REPO_DIR}/backend/vlc-bridge.py" 2>/dev/null | head -n 1)"
+[[ -n "$APP_VERSION" ]] || APP_VERSION="unknown"
 
 say() { printf '%s\n' "$*"; }
 err() { printf '%s\n' "$*" >&2; }
@@ -202,7 +206,9 @@ cmd="install"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help)
-      sed -n '1,/^DOC$/p' "$0" | sed '1d;$d'
+      echo "${APP_NAME} ${APP_VERSION}"
+      echo ""
+      sed -n "/^: <<'DOC'\$/,/^DOC\$/p" "$0" | sed '1d;$d'
       exit 0
       ;;
     --prefix)
@@ -251,6 +257,7 @@ SRC_REQUIREMENTS="${REPO_DIR}/requirements.txt"
 SRC_TOML_TEMPLATE="${SRC_CONFIG}/config.toml.template"
 
 DST_TOML="${CONFIG_DIR}/config.toml"
+INSTALL_STATE="${PREFIX}/install-state.json"
 
 [[ -d "$SRC_BACKEND" ]] || die "Missing directory: ${SRC_BACKEND}"
 [[ -d "$SRC_STATIC"  ]] || die "Missing directory: ${SRC_STATIC}"
@@ -307,6 +314,7 @@ SCHEMA = {
     ("system", "cloudflare"): ("enum", ["auto", "on", "off"]),
     ("system", "log_dir"): ("writable_dir",),
     ("system", "log_when_idle"): ("bool",),
+    ("system", "http_access_log"): ("bool",),
     ("system", "client_id_style"): ("enum", ["numeric", "cid", "short_cid", "ip"]),
     ("system", "action_debounce_ms"): ("int_min", 0),
     ("file_browse", "enabled"): ("bool",),
@@ -314,6 +322,7 @@ SCHEMA = {
     ("file_browse", "auto_recursive"): ("bool",),
     ("file_browse", "log_root_relative"): ("bool",),
     ("file_browse", "dirs"): ("dir_list",),
+    ("status", "show"): ("enum_list", ["version", "installed", "updated", "stale", "paths", "seats", "runtime", "token", "steps", "ready", "logkey"]),
     ("config", "seek_jump_by"): ("int_min", 0),
     ("config", "clock_show_remaining"): ("bool",),
     ("config", "resume_min_percent"): ("int_range", 0, 100),
@@ -348,6 +357,14 @@ def check(section, key, kind, v):
                 warn(section, key, f"not writable: {d}")
         except Exception as exc:
             warn(section, key, f"cannot create/access {d}: {exc}")
+    elif kind == "enum_list":
+        allowed = SCHEMA[(section, key)][1]
+        if not isinstance(v, list):
+            warn(section, key, f"expected a list, got {v!r}")
+            return
+        for entry in v:
+            if entry not in allowed:
+                warn(section, key, f"unknown item {entry!r} - expected one of {allowed}")
     elif kind == "dir_list":
         if not isinstance(v, list):
             warn(section, key, f"expected a list of paths, got {v!r}")
@@ -603,6 +620,70 @@ rm -rf "${PREFIX}/static"
 mkdir -p "${PREFIX}/static"
 cp -a "${REPO_DIR}/static/." "${PREFIX}/static/"
 
+write_install_state() {
+  local commit="" dirty="false" commit_date=""
+
+  if have git && git -C "${REPO_DIR}" rev-parse --git-dir >/dev/null 2>&1; then
+    commit="$(git -C "${REPO_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+    commit_date="$(git -C "${REPO_DIR}" log -1 --format=%cI 2>/dev/null || true)"
+    [[ -n "$(git -C "${REPO_DIR}" status --porcelain 2>/dev/null)" ]] && dirty="true"
+  fi
+
+  python3 - "${INSTALL_STATE}" "${REPO_DIR}" "${APP_VERSION}" "${commit}" "${dirty}" "${commit_date}" <<'PY'
+import json, sys, time, pathlib
+from datetime import datetime
+
+state_path = pathlib.Path(sys.argv[1])
+repo = pathlib.Path(sys.argv[2])
+version, commit, dirty, commit_date = sys.argv[3], sys.argv[4], sys.argv[5] == "true", sys.argv[6]
+
+def iso(ts):
+    return datetime.fromtimestamp(ts).astimezone().replace(microsecond=0).isoformat()
+
+def newest_source_mtime():
+    newest = 0.0
+    for name in ("backend", "static", "scripts", "config"):
+        directory = repo / name
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            if path.is_file():
+                newest = max(newest, path.stat().st_mtime)
+    for name in ("install.sh", "requirements.txt"):
+        path = repo / name
+        if path.is_file():
+            newest = max(newest, path.stat().st_mtime)
+    return newest
+
+if commit_date and commit and not dirty:
+    source_updated = commit_date
+else:
+    newest = newest_source_mtime()
+    source_updated = iso(newest) if newest else ""
+
+previous = {}
+if state_path.is_file():
+    try:
+        previous = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = {}
+
+state = {
+    "version": version,
+    "installed_at": iso(time.time()),
+    "source_updated_at": source_updated,
+    "commit": commit,
+    "dirty": dirty,
+    "source_dir": str(repo),
+    "previous_version": previous.get("version", ""),
+    "previous_installed_at": previous.get("installed_at", ""),
+}
+state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+write_install_state || say "[!] Could not write ${INSTALL_STATE} - version info will be unavailable."
+
 mkdir -p "${CONFIG_DIR}"
 
 regenerate_toml_config() {
@@ -764,6 +845,13 @@ generate_pass() {
   tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 24 || true
 }
 
+vlc_cfg_label() {
+  case "$1" in
+    *"/.var/app/org.videolan.VLC/"*) echo "flatpak" ;;
+    *) echo "native" ;;
+  esac
+}
+
 read_vlc_pass_from_cfg() {
   local cfg="$1"
   [[ -f "$cfg" ]] || return 1
@@ -868,7 +956,7 @@ else
   if confirm_default_yes "Check VLC config for existing HTTP password?"; then
     for cfg in "${VLC_CFG_CANDIDATES[@]}"; do
       if VLC_PASS_VALUE="$(read_vlc_pass_from_cfg "$cfg")"; then
-        say "[*] Found VLC HTTP password in: $cfg"
+        say "[*] Found an HTTP password in the $(vlc_cfg_label "$cfg") VLC config: $cfg"
         break
       fi
     done
@@ -944,19 +1032,18 @@ vlc_try_configure_http() {
   vlc_write_cfg_kv "$cfg" "http-password" "$VLC_PASS_VALUE"
 }
 
-VLC_CFG_TARGET=""
+VLC_CFG_TARGETS=()
 for cfg in "${VLC_CFG_CANDIDATES[@]}"; do
   if [[ -f "$cfg" ]]; then
-    VLC_CFG_TARGET="$cfg"
-    break
+    VLC_CFG_TARGETS+=("$cfg")
   fi
 done
 
-if [[ -z "$VLC_CFG_TARGET" ]]; then
+if [[ ${#VLC_CFG_TARGETS[@]} -eq 0 ]]; then
   if have flatpak && flatpak info org.videolan.VLC >/dev/null 2>&1; then
-    VLC_CFG_TARGET="${HOME}/.var/app/org.videolan.VLC/config/vlc/vlcrc"
+    VLC_CFG_TARGETS=("${HOME}/.var/app/org.videolan.VLC/config/vlc/vlcrc")
   else
-    VLC_CFG_TARGET="${HOME}/.config/vlc/vlcrc"
+    VLC_CFG_TARGETS=("${HOME}/.config/vlc/vlcrc")
   fi
 fi
 
@@ -969,21 +1056,35 @@ vlc_http_already_configured() {
   [[ "$pass" == "$VLC_PASS_VALUE" ]]
 }
 
-if vlc_http_already_configured "$VLC_CFG_TARGET"; then
-  say "[*] VLC HTTP control already enabled with the current password in ${VLC_CFG_TARGET}"
-elif confirm_default_yes "Configure VLC to enable HTTP control on startup with this password (so vlc-control can latch on later)?"; then
-  if [[ -w "$(dirname "$VLC_CFG_TARGET")" ]] || [[ -w "$VLC_CFG_TARGET" ]] || [[ ! -e "$VLC_CFG_TARGET" ]]; then
-    if vlc_try_configure_http "$VLC_CFG_TARGET"; then
-      say "[*] Updated VLC config: ${VLC_CFG_TARGET}"
-      say "    Restart VLC for changes to take effect."
+VLC_CFG_PENDING=()
+VLC_CFG_PENDING_LABELS=""
+for cfg in "${VLC_CFG_TARGETS[@]}"; do
+  if vlc_http_already_configured "$cfg"; then
+    say "[*] HTTP control already enabled with the current password in the $(vlc_cfg_label "$cfg") VLC config: ${cfg}"
+  else
+    VLC_CFG_PENDING+=("$cfg")
+    VLC_CFG_PENDING_LABELS+="${VLC_CFG_PENDING_LABELS:+ and }$(vlc_cfg_label "$cfg")"
+  fi
+done
+
+if [[ ${#VLC_CFG_PENDING[@]} -eq 0 ]]; then
+  :
+elif confirm_default_yes "Configure your ${VLC_CFG_PENDING_LABELS} VLC to enable HTTP control on startup with this password (so vlc-control can latch on later)?"; then
+  for cfg in "${VLC_CFG_PENDING[@]}"; do
+    label="$(vlc_cfg_label "$cfg")"
+    if [[ -w "$(dirname "$cfg")" ]] || [[ -w "$cfg" ]] || [[ ! -e "$cfg" ]]; then
+      if vlc_try_configure_http "$cfg"; then
+        say "[*] Updated the ${label} VLC config: ${cfg}"
+        say "    Restart ${label} VLC for changes to take effect."
+      else
+        say "[!] Tried to update the ${label} VLC config but it failed: ${cfg}"
+        say "    You may need to set up VLC HTTP manually or launch VLC via vlc-control."
+      fi
     else
-      say "[!] Tried to update VLC config but it failed: ${VLC_CFG_TARGET}"
+      say "[!] The ${label} VLC config path is not writable: ${cfg}"
       say "    You may need to set up VLC HTTP manually or launch VLC via vlc-control."
     fi
-  else
-    say "[!] VLC config path is not writable: ${VLC_CFG_TARGET}"
-    say "    You may need to set up VLC HTTP manually or launch VLC via vlc-control."
-  fi
+  done
 else
   say "[*] OK. VLC must be manually set up for HTTP control, or launched via vlc-control."
 fi

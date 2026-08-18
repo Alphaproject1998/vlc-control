@@ -15,6 +15,7 @@ max_clients = 2
 
 # Seconds a seat stays reserved after a client disconnects.
 # Prevents another user from immediately stealing the slot while the browser refreshes.
+# 0 turns grace off entirely, seats free the instant someone disconnects.
 grace_seconds = 30
 
 # VLC HTTP interface address and port
@@ -50,6 +51,11 @@ log_dir = "/tmp"
 # true            - poll and log all the time, at the cost of a constant 750ms VLC poll
 log_when_idle = false
 
+# Write one line per HTTP request to vlc-access.log in log_dir (never into the event log).
+# Off by default: those lines include the session token in the query string, and every guest
+# arriving through the Cloudflare tunnel shows up as 127.0.0.1 anyway. Turn on for debugging.
+http_access_log = false
+
 # How to identify a client in logs/console when they haven't set a nickname.
 # numeric - join order, C1/C2/... (default) | cid - full client id | short_cid - first 6 chars | ip - remote address
 client_id_style = "numeric"
@@ -62,6 +68,35 @@ nickname_max_length = 24
 # Otherwise one buffered client is chosen at random.
 # 0 disables buffering - commands execute immediately, first-come-first-served.
 action_debounce_ms = 250
+
+
+# ── Startup status ────────────────────────────────────────────────────────────
+# What the runner prints to the console when it starts. Host-side only, guests
+# never see any of this. The order below is ignored, the banner has a fixed one.
+
+[status]
+# Items to show. Remove one to hide it, use an empty list for the quietest possible start.
+# Warnings and errors always print regardless, as does the local URL (and the share link when a tunnel is up)
+# without those you have nothing to hand out.
+#
+# Banner, printed above the URLs:
+#   version   - app version and the commit it was installed from
+#   installed - when this copy was installed, and what it upgraded from
+#   updated   - when the source was last changed (your edits, not the install)
+#   stale     - warn when the source has changed since the last install
+#   paths     - install directory and the source it was installed from
+#   seats     - seat limit and grace period
+#   runtime   - python and cloudflared versions
+#
+# The rest of the startup output:
+#   token     - the bare token line (the local URL already contains it)
+#   steps     - progress lines while VLC, the bridge and the tunnel come up, including PIDs
+#   ready     - the config path and log file list under "[OK] Running"
+#   logkey    - one line explaining the +, -, *, ~, ! and x tags in the live log
+# "[OK] Running" and the Ctrl+C hint always print - they're how you know it finished starting.
+# So does the "waiting for the tunnel URL" line, but only if the tunnel is actually slow to answer:
+# a silent wait with nothing on screen is the one thing that always needs explaining.
+show = ["version", "installed", "updated", "stale", "token", "steps", "ready", "logkey"]
 
 
 # ── File browser ──────────────────────────────────────────────────────────────
@@ -168,6 +203,8 @@ show_icons = true
 
 # Footer hint text at the bottom of the card
 show_footer = true
+# Version line under the footer
+show_version = true
 
 # Playlist button and modal
 show_playlist = true

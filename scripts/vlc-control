@@ -11,15 +11,27 @@ DOC
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"
 PREFIX="${VLC_CONTROL_PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/vlc-control}"
 
+APP_VERSION="$(sed -n 's/^VERSION = "\([^"]*\)".*/\1/p' "$PREFIX/vlc-bridge.py" 2>/dev/null | head -n 1)"
+[[ -n "$APP_VERSION" ]] || APP_VERSION="unknown"
+
 show_help() {
-  cat <<'H'
-vlc-control [--seats N|-s N]
+  cat <<H
+vlc-control ${APP_VERSION}
+
+Usage: vlc-control [--seats N|-s N]
 
 Runs the local bridge + (optional) Cloudflare quick tunnel.
 
 Options:
   -s, --seats N   Override max seats (clients) for this run only
+  -v, --version   Print the version and exit
   -h, --help      Show this help
+H
+}
+
+show_version() {
+  cat <<H
+vlc-control ${APP_VERSION}
 H
 }
 
@@ -52,31 +64,111 @@ fields = [
     ("KILL_VLC_ON_EXIT", "yes" if s.get("kill_vlc_on_exit", True) else "no"),
     ("CLOUDFLARE", str(s.get("cloudflare", "auto"))),
     ("LOG_DIR", str(s.get("log_dir", "/tmp"))),
+    ("STATUS_SHOW", ",".join(str(i) for i in c.get("status", {}).get("show", []))),
 ]
 for k, v in fields:
     print(f"{k}={shlex.quote(v)}")
 PY
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  show_help
-  exit 0
-fi
+_read_install_state() {
+  python3 - "$1" "$2" <<'PY'
+import json, os, shlex, sys, pathlib
+from datetime import datetime
+
+state_path = pathlib.Path(sys.argv[1])
+fallback_version = sys.argv[2]
+
+try:
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    state = {}
+
+def ago(then):
+    seconds = (datetime.now().astimezone() - then).total_seconds()
+    if seconds < 60:
+        return "just now"
+    for size, unit in ((31536000, "year"), (86400, "day"), (3600, "hour"), (60, "minute")):
+        if seconds >= size:
+            count = int(seconds // size)
+            return f"{count} {unit}{'s' if count != 1 else ''} ago"
+    return "just now"
+
+def pretty(value):
+    if not value:
+        return ""
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError:
+        return ""
+    return f"{when.strftime('%d %b %Y, %H:%M')} ({ago(when)})"
+
+def newest_source_mtime(root):
+    newest = 0.0
+    for name in ("backend", "static", "scripts", "config"):
+        directory = root / name
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            if path.is_file():
+                newest = max(newest, path.stat().st_mtime)
+    for name in ("install.sh", "requirements.txt"):
+        path = root / name
+        if path.is_file():
+            newest = max(newest, path.stat().st_mtime)
+    return newest
+
+stale = "no"
+source_dir = str(state.get("source_dir") or "")
+installed_at = state.get("installed_at") or ""
+if source_dir and installed_at and os.path.isdir(source_dir):
+    try:
+        installed_ts = datetime.fromisoformat(installed_at).timestamp()
+        if newest_source_mtime(pathlib.Path(source_dir)) > installed_ts + 1:
+            stale = "yes"
+    except ValueError:
+        pass
+
+commit = str(state.get("commit") or "")
+if commit and state.get("dirty"):
+    commit += "+"
+
+fields = [
+    ("VC_VERSION", str(state.get("version") or fallback_version or "unknown")),
+    ("VC_COMMIT", commit),
+    ("VC_INSTALLED", pretty(installed_at)),
+    ("VC_UPDATED", pretty(state.get("source_updated_at") or "")),
+    ("VC_PREV_VERSION", str(state.get("previous_version") or "")),
+    ("VC_SOURCE_DIR", source_dir),
+    ("VC_STALE", stale),
+]
+for key, value in fields:
+    print(f"{key}={shlex.quote(value)}")
+PY
+}
 
 SEATS_OVERRIDE=""
+SEATS_SOURCE=""
+SEATS_IGNORED=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -s|--seats)
-      if ! [[ "$2" =~ ^[0-9]+$ ]] || (( $2 < 1 || $2 > 99 )); then
-      echo "[!] --seats requires a numeric value (1..99)" >&2
-      exit 2
+      if [[ -n "${2:-}" && ( "${2}" != -* || "${2}" =~ ^-[0-9] ) ]]; then
+        SEATS_OVERRIDE="$2"
+        shift 2
+      else
+        SEATS_OVERRIDE="(none given)"
+        shift
       fi
-      SEATS_OVERRIDE="$2"
-      shift 2
+      SEATS_SOURCE="--seats"
       ;;
     -h|--help)
       show_help
+      exit 0
+      ;;
+    -v|--version)
+      show_version
       exit 0
       ;;
     --)
@@ -95,13 +187,14 @@ CONFIG_DIR="${VLC_CONTROL_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vlc-cont
 CFG_TOML="$CONFIG_DIR/config.toml"
 
 if [[ ! -f "$CFG_TOML" ]]; then
-  echo "Missing config: $CFG_TOML" >&2
-  echo "Run install.sh to create it." >&2
+  echo "[x] No config file at $CFG_TOML" >&2
+  echo "    Run install.sh to create one, then try again." >&2
   exit 1
 fi
 
 _config_output="$(_read_system_config "$CFG_TOML")" || {
-  echo "Failed to load config: $CFG_TOML" >&2
+  echo "[x] Couldn't read $CFG_TOML" >&2
+  echo "    The error above says what's wrong with it. Re-running install.sh will rebuild it if you get stuck." >&2
   exit 1
 }
 eval "$_config_output"
@@ -112,17 +205,21 @@ eval "$_config_output"
 mkdir -p "${LOG_DIR}"
 LOG_DIR="$(cd "${LOG_DIR}" && pwd)"
 
+: > "${LOG_DIR}/vlc-bridge.log"
+: > "${LOG_DIR}/vlc-http.log"
+: > "${LOG_DIR}/vlc-cloudflared.log"
+
 if [[ -n "${VLC_CONTROL_SEATS:-}" && -z "$SEATS_OVERRIDE" ]]; then
   SEATS_OVERRIDE="$VLC_CONTROL_SEATS"
+  SEATS_SOURCE="VLC_CONTROL_SEATS"
 fi
 
 if [[ -n "$SEATS_OVERRIDE" ]]; then
-  if ! [[ "$SEATS_OVERRIDE" =~ ^[0-9]+$ ]] || [[ "$SEATS_OVERRIDE" -lt 1 ]] || [[ "$SEATS_OVERRIDE" -gt 99 ]]; then
-    echo "[!] Invalid seats override: '$SEATS_OVERRIDE' (expected 1..99)" >&2
-    exit 2
+  if [[ "$SEATS_OVERRIDE" =~ ^[0-9]+$ ]] && (( SEATS_OVERRIDE >= 1 && SEATS_OVERRIDE <= 99 )); then
+    MAX_CLIENTS="$SEATS_OVERRIDE"
+  else
+    SEATS_IGNORED="$SEATS_OVERRIDE"
   fi
-  MAX_CLIENTS="$SEATS_OVERRIDE"
-  export MAX_CLIENTS
 fi
 
 TOKEN="$(python3 - <<'PY'
@@ -139,24 +236,158 @@ export VLC_URL VLC_PASS MAX_CLIENTS GRACE_SECONDS PORT LOG_DIR
 
 PIDFILE="${LOG_DIR}/vlc-control-bridge.pid"
 
+_status_has() {
+  [[ ",${STATUS_SHOW:-}," == *",$1,"* ]]
+}
+
+_console_gap_done=""
+
+console_gap() {
+  if [[ -z "$_console_gap_done" ]]; then
+    echo
+    _console_gap_done=1
+  fi
+}
+
+step() {
+  if _status_has steps; then
+    console_gap
+    printf '%s\n' "$*"
+  fi
+}
+
+warn() {
+  console_gap >&2
+  printf '%s\n' "$*" >&2
+}
+
+print_status_banner() {
+  [[ -n "${STATUS_SHOW:-}" ]] || return 0
+
+  local state_output
+  state_output="$(_read_install_state "${PREFIX}/install-state.json" "$APP_VERSION" 2>/dev/null)" || return 0
+  eval "$state_output"
+
+  echo
+  if _status_has version; then
+    if [[ -n "$VC_COMMIT" ]]; then
+      echo "vlc-control ${VC_VERSION} (${VC_COMMIT})"
+    else
+      echo "vlc-control ${VC_VERSION}"
+    fi
+  fi
+  if _status_has installed && [[ -n "$VC_INSTALLED" ]]; then
+    if [[ -n "$VC_PREV_VERSION" && "$VC_PREV_VERSION" != "$VC_VERSION" ]]; then
+      echo "Installed:  ${VC_INSTALLED}, upgraded from ${VC_PREV_VERSION}"
+    else
+      echo "Installed:  ${VC_INSTALLED}"
+    fi
+  fi
+  if _status_has updated && [[ -n "$VC_UPDATED" ]]; then
+    echo "Updated:    ${VC_UPDATED}"
+  fi
+  if _status_has stale && [[ "$VC_STALE" == "yes" ]]; then
+    echo "[!] The source has changed since this copy was installed - re-run install.sh to pick the changes up."
+  fi
+  if _status_has paths; then
+    echo "Install:    ${PREFIX}"
+    if [[ -n "$VC_SOURCE_DIR" ]]; then
+      echo "Source:     ${VC_SOURCE_DIR}"
+    fi
+  fi
+  if _status_has seats; then
+    if [[ "${GRACE_SECONDS}" == "0" ]]; then
+      echo "Seats:      ${MAX_CLIENTS} (no grace)"
+    else
+      echo "Seats:      ${MAX_CLIENTS} (${GRACE_SECONDS}s grace)"
+    fi
+  fi
+  if _status_has runtime; then
+    local python_bin="$PREFIX/.venv/bin/python"
+    [[ -x "$python_bin" ]] || python_bin="python3"
+    local runtime_line
+    runtime_line="$("$python_bin" -V 2>&1 | head -n 1)"
+    if command -v cloudflared >/dev/null 2>&1; then
+      local cf_version
+      cf_version="$(cloudflared --version 2>/dev/null | head -n 1 | cut -d' ' -f3)"
+      if [[ -n "$cf_version" ]]; then
+        runtime_line="${runtime_line}, cloudflared ${cf_version}"
+      fi
+    fi
+    echo "Runtime:    ${runtime_line}"
+  fi
+}
+
+if [[ -n "$SEATS_IGNORED" ]]; then
+  if [[ "$SEATS_IGNORED" == "(none given)" ]]; then
+    warn "[!] ${SEATS_SOURCE} needs a whole number from 1 to 99 after it."
+  else
+    warn "[!] ${SEATS_SOURCE} was set to \"${SEATS_IGNORED}\", which isn't a whole number from 1 to 99."
+  fi
+  warn "    Ignoring it and using max_clients = ${MAX_CLIENTS} from ${CFG_TOML}."
+fi
+
+print_status_banner
+
 echo
-echo "Token:     $TOKEN"
-echo "Local URL: http://127.0.0.1:${PORT}/?t=${TOKEN}"
-echo
+if _status_has token; then
+  echo "Token:      $TOKEN"
+fi
+echo "Local URL:  http://127.0.0.1:${PORT}/?t=${TOKEN}"
+
+vlc_mode_available() {
+  case "$1" in
+    flatpak) command -v flatpak >/dev/null 2>&1 && flatpak info org.videolan.VLC >/dev/null 2>&1 ;;
+    native)  command -v vlc >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
 
 auto_detect_vlc_mode() {
-  if command -v flatpak >/dev/null 2>&1 && flatpak info org.videolan.VLC >/dev/null 2>&1; then
-    echo "flatpak"; return
-  fi
-  if command -v vlc >/dev/null 2>&1; then
-    echo "native"; return
-  fi
+  vlc_mode_available flatpak && { echo "flatpak"; return; }
+  vlc_mode_available native && { echo "native"; return; }
   echo "none"
+}
+
+VLC_CFG_CANDIDATES=(
+  "${HOME}/.config/vlc/vlcrc"
+  "${HOME}/.var/app/org.videolan.VLC/config/vlc/vlcrc"
+)
+
+vlc_cfg_label() {
+  case "$1" in
+    *"/.var/app/org.videolan.VLC/"*) echo "flatpak" ;;
+    *) echo "native" ;;
+  esac
+}
+
+check_vlc_configs() {
+  local cfg pass label
+  for cfg in "${VLC_CFG_CANDIDATES[@]}"; do
+    [[ -f "$cfg" ]] || continue
+    label="$(vlc_cfg_label "$cfg")"
+    pass="$(grep -E '^[[:space:]]*http-password=' "$cfg" | tail -n 1 | cut -d= -f2- || true)"
+    if ! grep -qE '^[[:space:]]*extraintf=.*\bhttp\b' "$cfg"; then
+      warn "[!] The ${label} VLC config has no HTTP interface enabled: ${cfg}"
+    elif [[ "$pass" != "$VLC_PASS" ]]; then
+      warn "[!] The ${label} VLC config has a different HTTP password to ${CFG_TOML}: ${cfg}"
+    else
+      continue
+    fi
+    warn "    If you start ${label} VLC yourself, this won't be able to reach it. Re-run install.sh to fix that."
+  done
 }
 
 resolved_vlc_mode="$VLC_MODE"
 if [[ "$resolved_vlc_mode" == "auto" || -z "$resolved_vlc_mode" ]]; then
   resolved_vlc_mode="$(auto_detect_vlc_mode)"
+elif [[ "$resolved_vlc_mode" != "none" ]] && ! vlc_mode_available "$resolved_vlc_mode"; then
+  warn "[!] vlc_mode = \"${resolved_vlc_mode}\" in ${CFG_TOML}, but no ${resolved_vlc_mode} VLC is installed."
+  installed_vlc_mode="$(auto_detect_vlc_mode)"
+  if [[ "$installed_vlc_mode" != "none" ]]; then
+    warn "    You have the ${installed_vlc_mode} one - set vlc_mode = \"${installed_vlc_mode}\" (or \"auto\") to use it."
+  fi
+  resolved_vlc_mode="none"
 fi
 
 vlc_port_open() {
@@ -177,28 +408,29 @@ vlc_http_auth_ok() {
 start_vlc_if_needed() {
   if vlc_port_open; then
     if vlc_http_auth_ok; then
-      echo "[*] Detected existing VLC HTTP at ${VLC_URL} (auth OK)."
+      step "[*] Using the VLC already running at ${VLC_URL}."
     else
-      echo "[!] Detected something listening at ${VLC_URL}, but auth failed with current VLC_PASS."
-      echo "    I will NOT start another VLC instance."
-      echo "    Fix: set vlc_pass in ${CFG_TOML} to match VLC's HTTP password, or start VLC with that password."
-      echo "[!] Aborting!"
+      warn "[x] Something is already listening at ${VLC_URL}, but it rejected the password."
+      warn "    Set vlc_pass in ${CFG_TOML} to match VLC's HTTP password, or start VLC with the password from there."
+      warn "    Nothing was started, in case that is a VLC you are already using. Stopping."
       exit 1
     fi
     return 0
   fi
 
   if [[ "${START_VLC}" != "yes" ]]; then
-    echo "[!] VLC port ${VLC_PORT} not open, and START_VLC=no. Start VLC manually."
+    warn "[!] VLC isn't running, and start_vlc = false in ${CFG_TOML}."
+    warn "    Start VLC yourself whenever you like - this will connect to it on its own."
     return 1
   fi
 
   if [[ "$resolved_vlc_mode" == "none" ]]; then
-    echo "[!] VLC not found (resolved VLC_MODE=none). Start VLC manually."
+    warn "[!] No VLC installation found, so none was started."
+    warn "    Install VLC or start it yourself - this will connect to it on its own."
     return 1
   fi
 
-  echo "[*] Starting VLC (${resolved_vlc_mode}) with HTTP control..."
+  step "[*] Starting VLC (${resolved_vlc_mode}) with HTTP control..."
   local vlc_cmd=()
   if [[ "$resolved_vlc_mode" == "flatpak" ]]; then
     vlc_cmd=(flatpak run org.videolan.VLC)
@@ -210,7 +442,7 @@ start_vlc_if_needed() {
   if [[ "${KILL_VLC_ON_EXIT}" == "yes" ]]; then
     "${vlc_cmd[@]}" >"${LOG_DIR}/vlc-http.log" 2>&1 &
     VLC_PID=$!
-    echo "[*] VLC PID: ${VLC_PID} (will be stopped when runner exits)"
+    step "[*] VLC started (PID ${VLC_PID}) - it will be closed when you stop this."
   else
     if command -v setsid >/dev/null 2>&1; then
       setsid "${vlc_cmd[@]}" >"${LOG_DIR}/vlc-http.log" 2>&1 < /dev/null &
@@ -218,7 +450,7 @@ start_vlc_if_needed() {
       "${vlc_cmd[@]}" >"${LOG_DIR}/vlc-http.log" 2>&1 < /dev/null &
       disown || true
     fi
-    echo "[*] VLC detached (KILL_VLC_ON_EXIT=no) - will survive runner shutdown."
+    step "[*] VLC started detached - it will keep running after this stops (kill_vlc_on_exit = false)."
   fi
 
   for _ in {1..30}; do
@@ -227,9 +459,10 @@ start_vlc_if_needed() {
   done
 
   if vlc_port_open; then
-    echo "[*] VLC started and port is open."
+    step "[*] VLC is up and answering on port ${VLC_PORT}."
   else
-    echo "[!] VLC did not open port ${VLC_PORT} yet. Check ${LOG_DIR}/vlc-http.log"
+    warn "[!] VLC didn't start listening on port ${VLC_PORT}. See ${LOG_DIR}/vlc-http.log"
+    warn "    Carrying on - if VLC comes up later, this will connect to it on its own."
     return 1
   fi
 }
@@ -239,7 +472,7 @@ stop_existing_bridge() {
     local old_pid
     old_pid="$(cat "$PIDFILE" 2>/dev/null || true)"
     if [[ -n "${old_pid}" ]] && kill -0 "${old_pid}" >/dev/null 2>&1; then
-      echo "[*] Stopping existing bridge PID ${old_pid}..."
+      step "[*] Stopping the bridge left over from the last run (PID ${old_pid})..."
       kill "${old_pid}" >/dev/null 2>&1 || true
       for _ in {1..40}; do
         kill -0 "${old_pid}" >/dev/null 2>&1 || break
@@ -275,55 +508,106 @@ start_bridge() {
   done
 
   deactivate || true
-  echo "[*] Bridge PID: $BRIDGE_PID"
+  step "[*] Bridge started (PID ${BRIDGE_PID})."
 }
 
-start_cloudflared() {
+CF_LAUNCH_STATE=""
+
+launch_cloudflared() {
   case "${CLOUDFLARE}" in
-    off) echo "[*] Cloudflare disabled (CLOUDFLARE=off)."; return 0 ;;
+    off) CF_LAUNCH_STATE="off"; return 0 ;;
     on|auto) ;;
-    *) echo "[!] Unknown CLOUDFLARE=${CLOUDFLARE}. Use auto|on|off."; return 1 ;;
+    *) CF_LAUNCH_STATE="bad_mode"; return 0 ;;
   esac
 
   if ! command -v cloudflared >/dev/null 2>&1; then
-    if [[ "${CLOUDFLARE}" == "on" ]]; then
-      echo "[!] cloudflared missing but CLOUDFLARE=on." >&2
-      return 1
-    fi
-    echo "[*] cloudflared not installed; local-only mode."
+    CF_LAUNCH_STATE="missing"
     return 0
   fi
 
   ORIGIN_URL="http://127.0.0.1:${PORT}"
-
-  if command -v curl >/dev/null 2>&1; then
-    if ! curl -4 -fsS --max-time 1 "${ORIGIN_URL}/" >/dev/null 2>&1; then
-      echo "[!] Local bridge is not reachable at ${ORIGIN_URL}/" >&2
-      echo "    Not starting Cloudflare tunnel. Check ${LOG_DIR}/vlc-bridge.log" >&2
-      return 1
-    fi
-
-    if ! curl -4 -fsS --max-time 1 "${ORIGIN_URL}/api/clients?t=${TOKEN}&cid=probe" >/dev/null 2>&1; then
-      local code
-      code="$(curl -4 -s -o /dev/null -w "%{http_code}" --max-time 1 "${ORIGIN_URL}/api/clients?t=${TOKEN}&cid=probe" || true)"
-      echo "[!] Bridge token check failed (HTTP ${code}) at ${ORIGIN_URL}/api/clients" >&2
-      echo "    TOKEN mismatch or bridge not fully ready. Check ${LOG_DIR}/vlc-bridge.log" >&2
-      return 1
-    fi
-  fi
-
-  echo "[*] Starting Cloudflare tunnel (quick tunnel)..."
-  : > "${LOG_DIR}/vlc-cloudflared.log"
   cloudflared tunnel --no-autoupdate --url "${ORIGIN_URL}" >>"${LOG_DIR}/vlc-cloudflared.log" 2>&1 &
   CF_PID=$!
-  echo "[*] Tunnel PID: $CF_PID"
+  CF_LAUNCH_STATE="started"
+}
+
+drop_tunnel() {
+  [[ -n "${CF_PID:-}" ]] || return 0
+  kill "$CF_PID" 2>/dev/null || true
+  CF_PID=""
+}
+
+tunnel_failed() {
+  if [[ "${CLOUDFLARE}" == "on" ]]; then
+    warn "[x] Stopping, because cloudflare = \"on\" in ${CFG_TOML} asks for a share link."
+    warn "    Set it to \"auto\" if you would rather keep going without one."
+    exit 1
+  fi
+  warn "    Carrying on without a share link."
+  return 0
+}
+
+check_bridge_alive() {
+  command -v curl >/dev/null 2>&1 || return 0
+
+  local origin="http://127.0.0.1:${PORT}"
+  if ! curl -4 -fsS --max-time 1 "${origin}/" >/dev/null 2>&1; then
+    warn "[x] The bridge never came up at ${origin} - aborting."
+    warn "    See ${LOG_DIR}/vlc-bridge.log"
+    drop_tunnel
+    exit 1
+  fi
+
+  local probe="${origin}/api/clients?t=${TOKEN}&cid=probe"
+  if ! curl -4 -fsS --max-time 1 "$probe" >/dev/null 2>&1; then
+    local code
+    code="$(curl -4 -s -o /dev/null -w "%{http_code}" --max-time 1 "$probe" || true)"
+    warn "[x] The bridge turned down this run's own access token (HTTP ${code}), so nobody could get in. Stopping."
+    warn "    See ${LOG_DIR}/vlc-bridge.log"
+    drop_tunnel
+    exit 1
+  fi
+}
+
+start_cloudflared() {
+  case "$CF_LAUNCH_STATE" in
+    off) step "[*] Sharing is off (cloudflare = \"off\") - local network only."; return 0 ;;
+    bad_mode)
+      warn "[!] cloudflare = \"${CLOUDFLARE}\" isn't a valid setting in ${CFG_TOML}. Use \"auto\", \"on\" or \"off\"."
+      warn "    Carrying on without a share link. The local URL above still works on the local network."
+      return 0
+      ;;
+    missing)
+      if [[ "${CLOUDFLARE}" == "on" ]]; then
+        warn "[!] cloudflare = \"on\", but cloudflared isn't installed."
+        tunnel_failed
+        return 0
+      fi
+      step "[*] cloudflared isn't installed, so there's no share link - local network only."
+      return 0
+      ;;
+  esac
+
+  step "[*] Cloudflare tunnel started (PID ${CF_PID})."
 
   PUBLIC_URL=""
+  local waited=0
   for _ in {1..80}; do
     PUBLIC_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "${LOG_DIR}/vlc-cloudflared.log" | tail -n 1 || true)"
     [[ -n "$PUBLIC_URL" ]] && break
+    waited=$((waited + 1))
+    if (( waited == 1 )); then
+      console_gap
+      printf '[*] Waiting for the tunnel URL'
+    fi
+    if (( waited % 5 == 0 )); then
+      printf '.'
+    fi
     sleep 0.2
   done
+  if (( waited > 0 )); then
+    printf '\n'
+  fi
 
   if [[ -n "$PUBLIC_URL" ]]; then
     SHARE_URL="${PUBLIC_URL}/?t=${TOKEN}"
@@ -331,18 +615,18 @@ start_cloudflared() {
     echo "==================== SHARE LINK ===================="
     echo "$SHARE_URL"
     echo "===================================================="
-    echo
 
     if command -v wl-copy >/dev/null 2>&1; then
       printf '%s' "$SHARE_URL" | wl-copy
-      echo "(Copied to clipboard via wl-copy)"
+      step "(Copied to your clipboard)"
     elif command -v xclip >/dev/null 2>&1; then
       printf '%s' "$SHARE_URL" | xclip -selection clipboard
-      echo "(Copied to clipboard via xclip)"
+      step "(Copied to your clipboard)"
     fi
   else
-    echo "[!] Tunnel started but URL not found yet. Showing last 40 log lines:" >&2
-    tail -n 40 "${LOG_DIR}/vlc-cloudflared.log" >&2 || true
+    warn "[!] The tunnel started but never gave us a link. Last 15 lines of ${LOG_DIR}/vlc-cloudflared.log:"
+    tail -n 15 "${LOG_DIR}/vlc-cloudflared.log" >&2 || true
+    tunnel_failed
   fi
 }
 
@@ -351,7 +635,7 @@ HOSTLOG_PIDFILE="${LOG_DIR}/vlc-control-hostlog.pid"
 start_hostlog() {
   stop_hostlog
 
-  local tail_cmd="tail -n 0 -F \"${LOG_DIR}/vlc-bridge.log\" 2>/dev/null | \"$PREFIX/.venv/bin/python\" \"$PREFIX/vlc-bridge.py\" --tail"
+  local tail_cmd="tail -n +1 -F \"${LOG_DIR}/vlc-bridge.log\" 2>/dev/null | \"$PREFIX/.venv/bin/python\" \"$PREFIX/vlc-bridge.py\" --tail"
 
   if command -v setsid >/dev/null 2>&1; then
     setsid bash -c "$tail_cmd" &
@@ -378,11 +662,11 @@ stop_hostlog() {
 cleanup() {
   trap - INT TERM EXIT
   echo
-  echo "[*] Stopping..."
+  echo "[*] Shutting down..."
   [[ -n "${CF_PID:-}" ]] && kill "$CF_PID" 2>/dev/null || true
   [[ -n "${BRIDGE_PID:-}" ]] && kill "$BRIDGE_PID" 2>/dev/null || true
   if [[ -n "${VLC_PID:-}" ]]; then
-    echo "[*] Stopping VLC (PID ${VLC_PID})..."
+    echo "[*] Closing VLC (PID ${VLC_PID})..."
     kill "$VLC_PID" 2>/dev/null || true
   fi
   stop_hostlog
@@ -390,20 +674,32 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
+launch_cloudflared
 start_vlc_if_needed || true
+check_vlc_configs
 start_bridge
-start_hostlog
 
+check_bridge_alive
 start_cloudflared
 
 echo
 echo "[OK] Running."
-echo "Config: ${CFG_TOML}"
-echo "Logs:"
-echo " - ${LOG_DIR}/vlc-bridge.log"
-echo " - ${LOG_DIR}/vlc-http.log"
-echo " - ${LOG_DIR}/vlc-cloudflared.log"
+if _status_has ready; then
+  echo "Config: ${CFG_TOML}"
+  echo "Logs:"
+  echo " - ${LOG_DIR}/vlc-bridge.log"
+  echo " - ${LOG_DIR}/vlc-http.log"
+  echo " - ${LOG_DIR}/vlc-cloudflared.log"
+  if [[ -f "${LOG_DIR}/vlc-access.log" ]]; then
+    echo " - ${LOG_DIR}/vlc-access.log"
+  fi
+fi
+if _status_has logkey; then
+  echo "Log key: + joined   - left   * action   ~ VLC   ! problem   x fatal"
+fi
 echo "Press Ctrl+C to stop."
+
 echo
+start_hostlog
 
 while true; do sleep 1; done
