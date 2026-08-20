@@ -82,7 +82,7 @@ On startup it will:
 6. Check the bridge is alive and answering, then print the share link
 
 ```
-vlc-control 0.5.0 (<commit hash><"+" if files are modified>)
+vlc-control 0.5.1 (<commit hash><"+" if files are modified>)
 Installed:  10 Aug 2026, 07:20 (2 hours ago)
 Updated:    09 Aug 2026, 09:17 (1 day ago)
 
