@@ -741,10 +741,17 @@ function applyStatus(status){
         const p = Math.max(0, Math.min(1, displayP));
         const v = String(Math.round(p * 1000));
         if (seekBarEl.value !== v) seekBarEl.value = v;
+        updateSeekFill();
     }
 
     updatePrevNextHints();
     if (newState !== prevState) renderPlaylist();
+}
+
+function updateSeekFill(){
+    if (!seekBarEl) return;
+    const pct = clampZeroToOne(Number(seekBarEl.value) / 1000) * 100;
+    seekBarEl.style.setProperty("--seek-fill", `${pct}%`);
 }
 
 function setPreviewFromSlider(){
@@ -833,7 +840,7 @@ if (seekBarEl){
         setPreviewFromSlider();
     });
 
-    seekBarEl.addEventListener("input", () => { if (dragging) setPreviewFromSlider(); });
+    seekBarEl.addEventListener("input", () => { updateSeekFill(); if (dragging) setPreviewFromSlider(); });
     seekBarEl.addEventListener("pointermove", () => { if (dragging) setPreviewFromSlider(); });
     seekBarEl.addEventListener("pointerup", () => finishSeek(true));
     seekBarEl.addEventListener("pointercancel", () => finishSeek(false));
@@ -918,7 +925,8 @@ function isAnyModalOpen(){
 }
 
 let __lastInputMode = "mouse";
-document.addEventListener("pointerdown", () => { __lastInputMode = "mouse"; }, true);
+let __pointerDownTarget = null;
+document.addEventListener("pointerdown", (e) => { __lastInputMode = "mouse"; __pointerDownTarget = e.target; }, true);
 document.addEventListener("touchstart", () => { __lastInputMode = "touch"; }, true);
 document.addEventListener("keydown", (e) => {
     if (e.key === "Tab" || e.key === "Enter" || e.key === " " || e.key === "Escape" || e.key === "q" || e.key.startsWith("Arrow")){
@@ -926,6 +934,10 @@ document.addEventListener("keydown", (e) => {
     }
 }, true);
 function isKeyboardInput(){ return __lastInputMode === "keyboard"; }
+
+function isBackdropClick(modal, e){
+    return e.target === modal && __pointerDownTarget === modal;
+}
 
 function modalFocusables(modal){
     if (!modal) return [];
@@ -1455,7 +1467,7 @@ btnResumeCancel.addEventListener("click", () => closeResumeModal("cancel"));
 btnResumeRestart.addEventListener("click", () => closeResumeModal("restart"));
 btnResumeContinue.addEventListener("click", () => closeResumeModal("resume"));
 resumeModal.addEventListener("click", (e) => {
-    if(e.target === resumeModal) closeResumeModal("cancel");
+    if(isBackdropClick(resumeModal, e)) closeResumeModal("cancel");
 });
 
 const NICKNAME_PROMPTED_KEY = "vlc_control_nickname_prompted";
@@ -1701,7 +1713,7 @@ clientNicknameInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter"){ e.preventDefault(); saveClientNickname(); }
 });
 clientsModal.addEventListener("click", (e) => {
-    if (e.target === clientsModal) closeClientsModal();
+    if (isBackdropClick(clientsModal, e)) closeClientsModal();
 });
 
 async function requestPlaylistPlay(item){
@@ -1748,7 +1760,7 @@ if(btnPlaylistClose) btnPlaylistClose.addEventListener("click", closePlaylist);
 if(btnPlaylistClear) btnPlaylistClear.addEventListener("click", playlistClear);
 if(playlistModal){
     playlistModal.addEventListener("click", (e) => {
-        if(e.target === playlistModal) closePlaylist();
+        if(isBackdropClick(playlistModal, e)) closePlaylist();
     });
 }
 document.addEventListener("keydown", (e) => {
@@ -2679,7 +2691,7 @@ if (btnFileBrowserView) btnFileBrowserView.addEventListener("click", () => {
 });
 if (fileBrowserModal){
     fileBrowserModal.addEventListener("click", (e) => {
-        if (e.target === fileBrowserModal) closeFileBrowser();
+        if (isBackdropClick(fileBrowserModal, e)) closeFileBrowser();
     });
 }
 if (fileBrowserSearchEl) fileBrowserSearchEl.addEventListener("input", () => renderFileBrowser());

@@ -29,7 +29,7 @@ except ImportError:
         tomllib = None  # type: ignore[assignment]
 
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 
 def _load_config() -> dict:
@@ -1813,11 +1813,15 @@ def ws_route(ws):
                 "list": roster,
             }
         }))
-        _ws_send_safe(ws, json.dumps({"type": "status", "data": read_status_dict()}))
         try:
-            _ws_send_safe(ws, json.dumps({"type": "playlist", "data": _apply_progress(read_playlist())}))
+            _ws_send_safe(ws, json.dumps({"type": "status", "data": read_status_dict()}))
         except Exception:
             pass
+        try:
+            initial_playlist = _apply_progress(read_playlist())
+        except Exception:
+            initial_playlist = []
+        _ws_send_safe(ws, json.dumps({"type": "playlist", "data": initial_playlist}))
     except Exception:
         pass
 
