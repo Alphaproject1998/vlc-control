@@ -702,4 +702,15 @@ echo "Press Ctrl+C to stop."
 echo
 start_hostlog
 
-while true; do sleep 1; done
+while sleep 1; do
+  if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+    warn "[x] The bridge stopped on its own, so nobody can connect any more."
+    warn "    See ${LOG_DIR}/vlc-bridge.log"
+    break
+  fi
+  if [[ -n "${CF_PID:-}" ]] && ! kill -0 "$CF_PID" 2>/dev/null; then
+    CF_PID=""
+    warn "[!] The Cloudflare tunnel stopped, so the share link is dead."
+    warn "    The local URL still works. Restart this to get a new link."
+  fi
+done

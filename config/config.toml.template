@@ -106,6 +106,7 @@ show = ["version", "installed", "updated", "stale", "token", "steps", "ready", "
 
 [file_browse]
 # Master switch - must be true for the file browser to work at all
+# playlist_control must be on too, or there is nothing to do in here
 enabled = false
 
 # Automatically expose the directory of the currently-playing file as a browse root.
@@ -145,13 +146,15 @@ log_root_relative = true
 # client-side UI only and control behaviour inside the browser.
 
 [features]
-# [server] Allow clients to seek (scrub the playback position)
+# [server] Allow clients to seek (scrub the playback position).
 allow_seeking = true
 
-# [server] Allow clients to modify the playlist (play item, remove, clear)
+# [server] Allow clients to modify the playlist (play item, remove, clear).
+# Off hides the file browser too, adding and playing files is all it is for
 playlist_control = true
 
 # Show a resume prompt when re-opening a partially-watched item
+# Still works with allow_seeking off, the server resumes to the position it recorded
 resume_prompt = true
 
 # Show a confirmation dialog before removing items from the playlist

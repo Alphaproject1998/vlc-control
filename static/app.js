@@ -205,7 +205,7 @@ function applyUiConfigToDom(){
     setBtn("btnStop",   !(buttonsConfig.stop === false));
     setBtn("btnPrev",   !(buttonsConfig.previous === false));
     setBtn("btnNext",   !(buttonsConfig.next === false));
-    const seekJumps = !(buttonsConfig.seekJumps === false);
+    const seekJumps = !(buttonsConfig.seekJumps === false) && !(features.allowSeeking === false);
     setBtn("btnBack", seekJumps);
     setBtn("btnFwd",  seekJumps);
     const showPlaylist = !(layout.showPlaylist === false) && !(buttonsConfig.playlist === false);
@@ -256,8 +256,8 @@ function applyUiConfigToDom(){
         ["btnBack","btnFwd"],
     ]);
 
-    const canRemove = !(features.playlistControl === false) && !(buttonsConfig.removeTrack === false);
-    const canAdd = !(buttonsConfig.addFile === false);
+    const canRemove = playlistControl && !(buttonsConfig.removeTrack === false);
+    const canAdd = playlistControl && !(buttonsConfig.addFile === false);
     if (fileBrowserWithSelectedEl){
         const addOpt = fileBrowserWithSelectedEl.querySelector("option[value='add']");
         const removeOpt = fileBrowserWithSelectedEl.querySelector("option[value='remove']");
@@ -290,7 +290,10 @@ async function loadFrontendConfig(){
         if (loaderText) loaderText.textContent = "Loading config…";
         const t = new URLSearchParams(location.search).get("t") || "";
         if (!t) return false;
-        const response = await fetch(`/api/config?t=${encodeURIComponent(t)}`, { cache: "no-store" });
+        const response = await fetch(`/api/config?t=${encodeURIComponent(t)}`, {
+            cache: "no-store",
+            signal: AbortSignal.timeout(8000),
+        });
         if (!response.ok) return false;
         const fetchedConfig = await response.json();
         deepMerge(window.uiConfig, fetchedConfig || {});
@@ -816,8 +819,9 @@ function seekBy(deltaSeconds){
 function finishSeek(commit){
     if (commit && sid){
         const p = clampZeroToOne(Number(seekBarEl.value) / 1000);
-        const pct = Math.round(p * 100);
-        seekVal(`${pct}%`);
+        const length = Number(lastStatus.length || 0);
+        if (length > 0) seekVal(String(Math.round(length * p)));
+        else seekVal(`${Math.round(p * 100)}%`);
     }
     if (seekPreviewEl) seekPreviewEl.classList.remove("show");
     dragging = false;
@@ -885,10 +889,6 @@ const playlistMultiselectBarEl = document.getElementById("playlistMultiselectBar
 const playlistMultiselectCheckEl = document.getElementById("playlistMultiselectCheck");
 const playlistSelectAllEl = document.getElementById("playlistSelectAll");
 const playlistWithSelectedEl = document.getElementById("playlistWithSelected");
-
-function canOpenPlaylist(){
-    return !(window.uiConfig.features?.playlistControl === false);
-}
 
 function updatePlaylistCountChip(){
     if (!playlistCountChip) return;
@@ -1716,10 +1716,13 @@ clientsModal.addEventListener("click", (e) => {
     if (isBackdropClick(clientsModal, e)) closeClientsModal();
 });
 
+function canResume(){
+    return (window.uiConfig.features || {}).resumePrompt !== false;
+}
+
 async function requestPlaylistPlay(item){
     if(!sid || !item) return;
-    const features = window.uiConfig.features || {};
-    if(features.resumePrompt !== false && isSignificantProgress(item)){
+    if(canResume() && isSignificantProgress(item)){
         const choice = await openResumeModal(item);
         if(choice === "cancel") return;
         if(choice === "resume"){
@@ -1747,15 +1750,14 @@ function playlistRemove(id){
 
 function playlistClear() {
     if (!sid) return;
-    if (!confirm("Clear the entire playlist?")) return;
+    const features = window.uiConfig.features || {};
+    if (!(features.removePrompt === false) && !confirm("Clear the entire playlist?")) return;
     if (!wsSend("playlist/clear")) return;
     lockForCommand("playlist", null, "Clearing playlist…");
 }
 
 if(btnPlaylist) btnPlaylist.addEventListener("click", openPlaylist);
-if(playlistCountChip) playlistCountChip.addEventListener("click", () => {
-    if (canOpenPlaylist()) openPlaylist();
-});
+if(playlistCountChip) playlistCountChip.addEventListener("click", openPlaylist);
 if(btnPlaylistClose) btnPlaylistClose.addEventListener("click", closePlaylist);
 if(btnPlaylistClear) btnPlaylistClear.addEventListener("click", playlistClear);
 if(playlistModal){
@@ -2164,6 +2166,7 @@ function buildFileBrowserRow(entry){
 
     const layout = window.uiConfig.layout || {};
     const buttonsConfig = window.uiConfig.buttons || {};
+    const playlistControl = !(window.uiConfig.features?.playlistControl === false);
     const showIcons = !(layout.showFileBrowserFileIcons === false);
     const showSize = !(layout.showFileBrowserFileSize === false);
     const showIndicator = !(layout.showFileBrowserFileIndicator === false);
@@ -2181,8 +2184,8 @@ function buildFileBrowserRow(entry){
     name.textContent = nameDisplay;
     name.title = nameValue;
     li.appendChild(name);
-    const showAdd = !(buttonsConfig.addFile === false);
-    const showPlay = !(buttonsConfig.playFile === false);
+    const showAdd = playlistControl && !(buttonsConfig.addFile === false);
+    const showPlay = playlistControl && !(buttonsConfig.playFile === false);
 
     if (entry.type === "file"){
         const badge = document.createElement("span");
@@ -2296,8 +2299,9 @@ function fileBrowserMultiAvailable(){
     if (window.uiConfig.features?.fileBrowserSelectMulti === false) return false;
     const features = window.uiConfig.features || {};
     const buttons = window.uiConfig.buttons || {};
-    const canAdd = !(buttons.addFile === false);
-    const canRemove = !(features.playlistControl === false) && !(buttons.removeTrack === false);
+    const playlistControl = !(features.playlistControl === false);
+    const canAdd = playlistControl && !(buttons.addFile === false);
+    const canRemove = playlistControl && !(buttons.removeTrack === false);
     return canAdd || canRemove;
 }
 
@@ -2644,8 +2648,7 @@ async function filesPlay(name){
 
     const entry = fileBrowserState.entries.find(item => item.type === "file" && item.name === name);
     let resumeAt = 0;
-    const features = window.uiConfig.features || {};
-    if (entry && features.resumePrompt !== false && isSignificantProgress(entry)){
+    if (entry && canResume() && isSignificantProgress(entry)){
         const choice = await openResumeModal(entry);
         if (choice === "cancel") return;
         if (choice === "resume"){
@@ -2961,8 +2964,6 @@ function setupKeyboardShortcuts(){
         }
         if (key === "q" || key === "Q"){
             if (isResumeOpen()) return;
-            const playlistAllowed = !(features.playlistControl === false);
-            if (!playlistAllowed) return;
             e.preventDefault(); e.stopPropagation();
             if (isPlaylistOpen()) closePlaylist(); else openPlaylist();
             return;

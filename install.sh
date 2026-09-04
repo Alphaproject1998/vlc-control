@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 : <<'DOC'
 Installer for vlc-control.
@@ -146,7 +146,11 @@ do_uninstall() {
   rm -f "${BIN_DIR}/vlc-control" || true
   rm -f "${DESKTOP_FILE}" || true
   rm -rf "${PREFIX}" || true
-  rm -rf "${CONFIG_DIR}" || true
+  if [[ -d "${CONFIG_DIR}" ]] && confirm_default_yes "Keep your settings at ${CONFIG_DIR}?"; then
+    say "[*] Left your settings in place."
+  else
+    rm -rf "${CONFIG_DIR}" || true
+  fi
   say "[*] Uninstall complete."
 }
 
@@ -316,6 +320,7 @@ SCHEMA = {
     ("system", "log_when_idle"): ("bool",),
     ("system", "http_access_log"): ("bool",),
     ("system", "client_id_style"): ("enum", ["numeric", "cid", "short_cid", "ip"]),
+    ("system", "nickname_max_length"): ("int_min", 1),
     ("system", "action_debounce_ms"): ("int_min", 0),
     ("file_browse", "enabled"): ("bool",),
     ("file_browse", "auto"): ("bool",),

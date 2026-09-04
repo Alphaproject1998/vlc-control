@@ -29,7 +29,7 @@ except ImportError:
         tomllib = None  # type: ignore[assignment]
 
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 
 
 def _load_config() -> dict:
@@ -379,6 +379,7 @@ def _build_frontend_config(cfg: dict) -> dict:
 _FRONTEND_CONFIG: dict = _build_frontend_config(_CFG)
 
 app = Flask(__name__, static_folder="static", static_url_path="")
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 sock = Sock(app)
 
 _active: dict[str, set] = {}          # cid -> set(ws)
@@ -824,20 +825,28 @@ def _update_session_progress(status: dict, items: list[dict]) -> None:
     current = next((item for item in items if item.get("isCurrent")), None)
     if not current:
         return
-    playlist_id = str(current.get("id") or "")
-    if not playlist_id:
+    uri = current.get("uri") or ""
+    if not uri:
         return
-    _session_progress[playlist_id] = {
+    _session_progress[uri] = {
         "watched": int(status.get("time") or 0),
         "duration": int(status.get("length") or 0),
     }
 
 
+def _resume_position(uri: str, requested: int) -> int:
+    if ALLOW_SEEKING:
+        return requested
+    if not requested:
+        return 0
+    return int((_session_progress.get(uri) or {}).get("watched") or 0)
+
+
 def _apply_progress(items: list[dict]) -> list[dict]:
     for item in items:
-        playlist_id = str(item.get("id") or "")
-        if playlist_id and playlist_id in _session_progress:
-            item["progress"] = dict(_session_progress[playlist_id])
+        progress = _session_progress.get(item.get("uri") or "")
+        if progress:
+            item["progress"] = dict(progress)
     return items
 
 
@@ -1025,12 +1034,6 @@ def broadcaster_loop() -> None:
             playlist_items = _apply_progress(playlist_items)
             _last_playlist = playlist_items
 
-            if _session_progress:
-                live_ids = {str(item.get("id") or "") for item in playlist_items}
-                for stale_id in list(_session_progress):
-                    if stale_id not in live_ids:
-                        del _session_progress[stale_id]
-
             new_dir: str | None = None
             if FILE_BROWSE_AUTO:
                 found_current = False
@@ -1074,6 +1077,13 @@ def broadcaster_loop() -> None:
 
 
 threading.Thread(target=broadcaster_loop, daemon=True).start()
+
+
+@app.after_request
+def _security_headers(response):
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    return response
 
 
 @app.get("/")
@@ -1291,8 +1301,9 @@ def _list_dir(full: str, rel: str, *, allow_sub: bool = True) -> list[dict]:
                         entry["playlistId"] = playlist_id
                     if item.get("isCurrent"):
                         entry["isCurrent"] = True
-                    if playlist_id and playlist_id in _session_progress:
-                        entry["progress"] = dict(_session_progress[playlist_id])
+                    progress = _session_progress.get(uri)
+                    if progress:
+                        entry["progress"] = dict(progress)
                     if not entry.get("progress") and item.get("duration"):
                         entry["duration"] = int(item.get("duration") or 0)
                 entries.append(entry)
@@ -1378,6 +1389,7 @@ def files_add():
     require_token()
     _, cid = require_sid()
     _require_file_browse()
+    require_playlist_control()
 
     body = request.json or {}
     root_id = str(body.get("root", "")).strip()
@@ -1422,6 +1434,7 @@ def files_play():
     require_token()
     _, cid = require_sid()
     _require_file_browse()
+    require_playlist_control()
 
     root_id, rel, full = _resolve_file_arg()
     uri = _path_to_uri(full)
@@ -1433,6 +1446,7 @@ def files_play():
             resume_at = max(0, int(body["resume_at"]))
         except (ValueError, TypeError):
             abort(400, "Invalid resume_at")
+    resume_at = _resume_position(uri, resume_at)
 
     identity = _client_identity(cid)
 
@@ -1597,6 +1611,7 @@ def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
 
         elif op == "set_nickname":
             nickname = str(data.get("nickname") or "").strip()[:NICKNAME_MAX_LENGTH]
+            taken = False
             with _lock:
                 meta = _ensure_client_meta_locked(cid)
                 old_nickname = meta.get("nickname")
@@ -1606,15 +1621,15 @@ def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
                         for other_cid, other_meta in _client_meta.items()
                         if other_cid in _active or other_cid in _reserved
                     )
-                    if taken:
-                        _ws_err(ws, op, "nickname taken")
-                        return
-                changed = (nickname or None) != old_nickname
+                changed = not taken and (nickname or None) != old_nickname
                 if changed:
                     fallback = _client_fallback_identity_locked(cid)
                     old_display = old_nickname or fallback
                     new_display = nickname or fallback
-                meta["nickname"] = nickname or None
+                    meta["nickname"] = nickname or None
+            if taken:
+                _ws_err(ws, op, "nickname taken")
+                return
             if changed:
                 log_event("nickname_set" if nickname else "nickname_clear",
                           cid=cid, identity=old_display, old=old_display, new=new_display)
@@ -1672,12 +1687,14 @@ def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
                 except (ValueError, TypeError):
                     pass
 
-            name, total = "", 0
+            name, total, uri = "", 0, ""
             for item in _last_playlist:
                 if item.get("id") == playlist_id:
                     name = item.get("name") or ""
                     total = int(item.get("duration") or 0)
+                    uri = item.get("uri") or ""
                     break
+            resume_at = _resume_position(uri, resume_at)
 
             op_key = "playlist_resume" if resume_at > 0 else "playlist_skip"
             _set_pending(op_key, cid, value=playlist_id)
