@@ -49,6 +49,7 @@ window.uiConfig = window.uiConfig || {
         playlist: true,
         clearPlaylist: true,
         removeTrack: true,
+        undoRemove: true,
         addFile: true,
         playFile: true
     },
@@ -60,7 +61,8 @@ window.uiConfig = window.uiConfig || {
         fileBrowser: true,
         resumePrompt: true,
         removePrompt: true,
-        playlistUndo: true, //TODO: Undo system, this is the toggle
+        playlistUndo: true,
+        undoPrompt: true,
         playlistSelectMulti: true,
         fileBrowserSelectMulti: true
     },
@@ -80,6 +82,13 @@ let playlistMultiActive = false;
 const playlistSelected = new Set();
 let fileBrowserMultiActive = false;
 const fileBrowserSelected = new Set();
+let undoRecords = [];
+let undoHistorySize = 0;
+let undoSynced = false;
+let undoToast = null;
+let undoToastRecordId = null;
+const undoSelected = new Map();
+const undoExpanded = new Set();
 
 function getSeekJumpBy(){
     const config = window.uiConfig.config;
@@ -218,9 +227,11 @@ function applyUiConfigToDom(){
     const showAddFiles = playlistControl
         && !(features.fileBrowser === false)
         && !(layout.showFileBrowser === false);
+    const showUndo = playlistUndoAvailable() && !(buttonsConfig.undoRemove === false);
     if (clearBtn) clearBtn.style.display = showClear ? "" : "none";
     if (addBtn) addBtn.style.display = showAddFiles ? "" : "none";
-    if (playlistModalFooter) playlistModalFooter.style.display = (showClear || showAddFiles) ? "" : "none";
+    renderUndoButton();
+    if (playlistModalFooter) playlistModalFooter.style.display = (showClear || showAddFiles || showUndo) ? "" : "none";
 
     const fileBrowserSearchInput = document.getElementById("fileBrowserSearch");
     if (fileBrowserSearchInput) fileBrowserSearchInput.style.display = (layout.showFileBrowserSearch === false) ? "none" : "";
@@ -232,7 +243,7 @@ function applyUiConfigToDom(){
     if (lf) lf.textContent = `+${jump}s`;
 
     const showIcons = !(layout.showIcons === false);
-    document.querySelectorAll(".grid button, #btnPlaylistAddFiles").forEach(btn => {
+    document.querySelectorAll(".grid button, #btnPlaylistAddFiles, #btnPlaylistUndo").forEach(btn => {
         const first = btn.childNodes && btn.childNodes.length ? btn.childNodes[0] : null;
         if (first && first.nodeType === Node.TEXT_NODE){
             if (btn.dataset.iconText === undefined){
@@ -884,6 +895,14 @@ const playlistItemsEl = document.getElementById("playlistItems");
 const playlistEmptyEl = document.getElementById("playlistEmpty");
 const btnPlaylistClose = document.getElementById("btnPlaylistClose");
 const btnPlaylistClear = document.getElementById("btnPlaylistClear");
+const btnPlaylistUndo = document.getElementById("btnPlaylistUndo");
+const undoModal = document.getElementById("undoModal");
+const undoRecordsEl = document.getElementById("undoRecords");
+const undoEmptyEl = document.getElementById("undoEmpty");
+const undoCapacityEl = document.getElementById("undoCapacity");
+const btnUndoClose = document.getElementById("btnUndoClose");
+const btnUndoCancel = document.getElementById("btnUndoCancel");
+const btnUndoRestore = document.getElementById("btnUndoRestore");
 const playlistCountChip = document.getElementById("playlistCountChip");
 const playlistMultiselectBarEl = document.getElementById("playlistMultiselectBar");
 const playlistMultiselectCheckEl = document.getElementById("playlistMultiselectCheck");
@@ -921,7 +940,7 @@ function closePlaylist() {
 function isPlaylistOpen(){ return playlistModal && !playlistModal.hidden; }
 
 function isAnyModalOpen(){
-    return isResumeOpen() || isPlaylistOpen() || isFileBrowserOpen() || isClientsOpen();
+    return isResumeOpen() || isPlaylistOpen() || isFileBrowserOpen() || isClientsOpen() || isUndoOpen();
 }
 
 let __lastInputMode = "mouse";
@@ -1756,10 +1775,315 @@ function playlistClear() {
     lockForCommand("playlist", null, "Clearing playlist…");
 }
 
+function playlistUndoAvailable(){
+    const features = window.uiConfig.features || {};
+    return !(features.playlistControl === false) && !(features.playlistUndo === false);
+}
+
+function setUndoText(el, text){
+    if (el && el.textContent !== text) el.textContent = text;
+}
+
+function undoItemCountText(count){
+    return `${count} item${count !== 1 ? "s" : ""}`;
+}
+
+function undoRecordSummary(record){
+    const count = record.items.length;
+    if (record.op === "clear") return `Cleared the playlist (${undoItemCountText(count)})`;
+    return count === 1 ? `Removed "${record.items[0].name || "(untitled)"}"` : `Removed ${count} items`;
+}
+
+function undoRecordListText(record){
+    const lines = record.items.slice(0, 10).map(item => `• ${item.name || "(untitled)"}`);
+    if (record.items.length > lines.length) lines.push(`…and ${record.items.length - lines.length} more`);
+    return lines.join("\n");
+}
+
+function undoRecordTitle(record){
+    return `${undoRecordSummary(record)}, by ${record.who} at ${formatClock(record.at)}:\n${undoRecordListText(record)}`;
+}
+
+function undoRestorableKeys(record, inPlaylist = new Set(playlistItems.map(it => it.uri))){
+    return record.items.filter(item => !inPlaylist.has(item.uri)).map(item => item.key);
+}
+
+function sendUndoPicks(picks){
+    if (!wsSend("playlist/undo", { picks })) return;
+    lockForCommand("playlist", null, "Putting it back…");
+}
+
+function undoRecordNow(recordId){
+    if (!sid || !playlistUndoAvailable()) return;
+    const record = undoRecords.find(it => it.id === recordId);
+    if (!record) return;
+    const features = window.uiConfig.features || {};
+    const question = `Put ${undoItemCountText(record.items.length)} back at the end of the playlist?\n\n${undoRecordListText(record)}`;
+    if (!(features.undoPrompt === false) && !confirm(question)) return;
+    sendUndoPicks([{ record: record.id, items: record.items.map(item => item.key) }]);
+}
+
+function renderUndoButton(){
+    if (!btnPlaylistUndo) return;
+    const buttonsConfig = window.uiConfig.buttons || {};
+    const show = playlistUndoAvailable() && !(buttonsConfig.undoRemove === false);
+    const display = show ? "" : "none";
+    const newest = undoRecords[undoRecords.length - 1];
+    const count = undoRecords.length;
+    let title = "";
+    if (show && newest) title = `${count} removal${count !== 1 ? "s" : ""} can be put back. Latest: ${undoRecordSummary(newest)}, by ${newest.who}`;
+    else if (show) title = "Nothing to undo yet";
+    if (btnPlaylistUndo.style.display !== display) btnPlaylistUndo.style.display = display;
+    if (btnPlaylistUndo.title !== title) btnPlaylistUndo.title = title;
+    if (btnPlaylistUndo.disabled !== !count) btnPlaylistUndo.disabled = !count;
+}
+
+function pruneUndoSelection(){
+    const byId = new Map(undoRecords.map(record => [record.id, record]));
+    for (const [recordId, keys] of undoSelected){
+        const record = byId.get(recordId);
+        if (!record){
+            undoSelected.delete(recordId);
+            continue;
+        }
+        const liveKeys = new Set(record.items.map(item => item.key));
+        for (const key of keys){
+            if (!liveKeys.has(key)) keys.delete(key);
+        }
+        if (!keys.size) undoSelected.delete(recordId);
+    }
+    for (const recordId of undoExpanded){
+        if (!byId.has(recordId)) undoExpanded.delete(recordId);
+    }
+}
+
+function applyUndoHistory(records){
+    const knownIds = new Set(undoRecords.map(record => record.id));
+    const firstSync = !undoSynced;
+    undoSynced = true;
+    undoRecords = records;
+    pruneUndoSelection();
+    renderUndoButton();
+    if (isUndoOpen()) renderUndoModal();
+
+    if (undoToast && !records.some(record => record.id === undoToastRecordId)){
+        dismissToast(undoToast);
+        undoToast = null;
+        undoToastRecordId = null;
+    }
+    if (firstSync || !playlistUndoAvailable()) return;
+    const fresh = records.filter(record => record.mine && !knownIds.has(record.id));
+    if (!fresh.length) return;
+    const record = fresh[fresh.length - 1];
+    if (undoToast) dismissToast(undoToast);
+    undoToastRecordId = record.id;
+    undoToast = showToast(undoRecordSummary(record), "info", 8000, {
+        label: "Undo",
+        title: undoRecordTitle(record),
+        onClick: () => undoRecordNow(record.id),
+    });
+}
+
+function openUndoModal(){
+    if (!undoModal || !playlistUndoAvailable()) return;
+    pruneUndoSelection();
+    undoModal.hidden = false;
+    renderUndoModal();
+    if (isKeyboardInput()) requestAnimationFrame(() => undoRecordsEl?.querySelector("input:not(:disabled)")?.focus());
+}
+function closeUndoModal(){
+    if (!undoModal) return;
+    undoModal.hidden = true;
+}
+function isUndoOpen(){ return undoModal && !undoModal.hidden; }
+
+function toggleUndoRecord(recordId, on){
+    const record = undoRecords.find(it => it.id === recordId);
+    if (on && record) undoSelected.set(recordId, new Set(undoRestorableKeys(record)));
+    else undoSelected.delete(recordId);
+    renderUndoModal();
+}
+
+function toggleUndoItem(recordId, key, on){
+    let keys = undoSelected.get(recordId);
+    if (on){
+        if (!keys){
+            keys = new Set();
+            undoSelected.set(recordId, keys);
+        }
+        keys.add(key);
+    } else if (keys){
+        keys.delete(key);
+        if (!keys.size) undoSelected.delete(recordId);
+    }
+    renderUndoModal();
+}
+
+function buildUndoRecordEl(record){
+    const li = document.createElement("li");
+    li.className = "undo-record";
+    li.dataset.id = String(record.id);
+
+    const head = document.createElement("div");
+    head.className = "undo-record-head";
+
+    const main = document.createElement("label");
+    main.className = "undo-record-main";
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.className = "undo-record-check";
+    check.addEventListener("change", () => toggleUndoRecord(record.id, check.checked));
+    const text = document.createElement("div");
+    text.className = "undo-record-text";
+    const summary = document.createElement("div");
+    summary.className = "undo-record-summary";
+    const meta = document.createElement("div");
+    meta.className = "undo-record-meta";
+    text.append(summary, meta);
+    main.append(check, text);
+
+    const expand = document.createElement("button");
+    expand.type = "button";
+    expand.className = "icon-btn undo-record-expand";
+    expand.addEventListener("click", () => {
+        if (undoExpanded.has(record.id)) undoExpanded.delete(record.id);
+        else undoExpanded.add(record.id);
+        renderUndoModal();
+    });
+
+    head.append(main, expand);
+    const itemsList = document.createElement("ul");
+    itemsList.className = "undo-record-items";
+    li.append(head, itemsList);
+    return li;
+}
+
+function syncUndoItems(listEl, record, inPlaylist){
+    const selected = undoSelected.get(record.id);
+    const liveKeys = new Set(record.items.map(item => String(item.key)));
+    for (const row of [...listEl.children]){
+        if (!liveKeys.has(row.dataset.key)) row.remove();
+    }
+    record.items.forEach((item, position) => {
+        let row = listEl.querySelector(`:scope > li[data-key="${item.key}"]`);
+        if (!row){
+            row = document.createElement("li");
+            row.className = "undo-item";
+            row.dataset.key = String(item.key);
+            const label = document.createElement("label");
+            const check = document.createElement("input");
+            check.type = "checkbox";
+            check.addEventListener("change", () => toggleUndoItem(record.id, item.key, check.checked));
+            const name = document.createElement("span");
+            name.className = "undo-item-name";
+            label.append(check, name);
+            row.appendChild(label);
+        }
+        const back = inPlaylist.has(item.uri);
+        const check = row.querySelector("input");
+        const checked = !back && !!selected?.has(item.key);
+        if (check.checked !== checked) check.checked = checked;
+        if (check.disabled !== back) check.disabled = back;
+        row.classList.toggle("is-back", back);
+        const itemName = item.name || "(untitled)";
+        setUndoText(row.querySelector(".undo-item-name"), back ? `${itemName} (already back)` : itemName);
+        if (listEl.children[position] !== row) listEl.insertBefore(row, listEl.children[position] || null);
+    });
+}
+
+function syncUndoRecordEl(li, record, inPlaylist){
+    const restorable = undoRestorableKeys(record, inPlaylist);
+    const selected = undoSelected.get(record.id);
+    if (selected){
+        for (const key of selected){
+            if (!restorable.includes(key)) selected.delete(key);
+        }
+        if (!selected.size) undoSelected.delete(record.id);
+    }
+    const selectedCount = undoSelected.get(record.id)?.size ?? 0;
+    const allSelected = restorable.length > 0 && selectedCount === restorable.length;
+    const partial = selectedCount > 0 && !allSelected;
+
+    const check = li.querySelector(".undo-record-check");
+    if (check.checked !== allSelected) check.checked = allSelected;
+    if (check.indeterminate !== partial) check.indeterminate = partial;
+    if (check.disabled !== (restorable.length === 0)) check.disabled = restorable.length === 0;
+
+    const backCount = record.items.length - restorable.length;
+    setUndoText(li.querySelector(".undo-record-summary"), undoRecordSummary(record));
+    setUndoText(li.querySelector(".undo-record-meta"), `${record.who} at ${formatClock(record.at)}${backCount ? `, ${backCount} already back` : ""}`);
+    li.classList.toggle("is-mine", !!record.mine);
+    const main = li.querySelector(".undo-record-main");
+    const recordTitle = undoRecordTitle(record);
+    if (main.title !== recordTitle) main.title = recordTitle;
+
+    const expandable = record.items.length > 1 || record.op === "clear";
+    const expanded = expandable && undoExpanded.has(record.id);
+    const expand = li.querySelector(".undo-record-expand");
+    if (expand.hidden !== !expandable) expand.hidden = !expandable;
+    const expandedAttr = String(expanded);
+    if (expand.getAttribute("aria-expanded") !== expandedAttr) expand.setAttribute("aria-expanded", expandedAttr);
+    const expandLabel = expanded ? "Hide items" : "Show items";
+    if (expand.getAttribute("aria-label") !== expandLabel) expand.setAttribute("aria-label", expandLabel);
+
+    const itemsList = li.querySelector(".undo-record-items");
+    if (itemsList.hidden !== !expanded) itemsList.hidden = !expanded;
+    if (expanded) syncUndoItems(itemsList, record, inPlaylist);
+}
+
+function undoSelectedCount(){
+    let count = 0;
+    for (const keys of undoSelected.values()){
+        count += keys.size;
+    }
+    return count;
+}
+
+function renderUndoModal(){
+    if (!undoRecordsEl) return;
+    const inPlaylist = new Set(playlistItems.map(it => it.uri));
+    const ordered = [...undoRecords].reverse();
+    const liveIds = new Set(ordered.map(record => String(record.id)));
+    for (const li of [...undoRecordsEl.children]){
+        if (!liveIds.has(li.dataset.id)) li.remove();
+    }
+    ordered.forEach((record, position) => {
+        const li = undoRecordsEl.querySelector(`:scope > li[data-id="${record.id}"]`) || buildUndoRecordEl(record);
+        syncUndoRecordEl(li, record, inPlaylist);
+        if (undoRecordsEl.children[position] !== li) undoRecordsEl.insertBefore(li, undoRecordsEl.children[position] || null);
+    });
+    if (undoEmptyEl && undoEmptyEl.hidden !== (ordered.length > 0)) undoEmptyEl.hidden = ordered.length > 0;
+    setUndoText(undoCapacityEl, undoHistorySize ? `${ordered.length} of ${undoHistorySize} records kept.` : "");
+
+    if (!btnUndoRestore) return;
+    const count = undoSelectedCount();
+    setUndoText(btnUndoRestore, count ? `Put back ${count}` : "Put back");
+    const disabled = count === 0 || !!_cmdLock;
+    if (btnUndoRestore.disabled !== disabled) btnUndoRestore.disabled = disabled;
+}
+
+function restoreUndoSelection(){
+    if (!sid || !playlistUndoAvailable()) return;
+    const picks = [...undoSelected].map(([record, keys]) => ({ record, items: [...keys] }));
+    if (!picks.length) return;
+    undoSelected.clear();
+    closeUndoModal();
+    sendUndoPicks(picks);
+}
+
 if(btnPlaylist) btnPlaylist.addEventListener("click", openPlaylist);
 if(playlistCountChip) playlistCountChip.addEventListener("click", openPlaylist);
 if(btnPlaylistClose) btnPlaylistClose.addEventListener("click", closePlaylist);
 if(btnPlaylistClear) btnPlaylistClear.addEventListener("click", playlistClear);
+if(btnPlaylistUndo) btnPlaylistUndo.addEventListener("click", openUndoModal);
+if (btnUndoClose) btnUndoClose.addEventListener("click", closeUndoModal);
+if (btnUndoCancel) btnUndoCancel.addEventListener("click", closeUndoModal);
+if (btnUndoRestore) btnUndoRestore.addEventListener("click", restoreUndoSelection);
+if (undoModal){
+    undoModal.addEventListener("click", (e) => {
+        if (isBackdropClick(undoModal, e)) closeUndoModal();
+    });
+}
 if(playlistModal){
     playlistModal.addEventListener("click", (e) => {
         if(isBackdropClick(playlistModal, e)) closePlaylist();
@@ -1794,6 +2118,11 @@ document.addEventListener("keydown", (e) => {
             actionBtns[idx].focus();
             return;
         }
+        return;
+    }
+    if (isUndoOpen()){
+        if (trapTab(undoModal, e)) return;
+        if (e.key === "Escape"){ e.preventDefault(); closeUndoModal(); return; }
         return;
     }
     if (isFileBrowserOpen()){
@@ -1852,6 +2181,13 @@ document.addEventListener("keydown", (e) => {
             } else {
                 sendApiCommand("toggle");
             }
+            return;
+        }
+        if ((e.key === "u" || e.key === "U") && !e.repeat && !(e.ctrlKey || e.altKey || e.metaKey)){
+            if (!playlistUndoAvailable()) return;
+            e.preventDefault(); e.stopPropagation();
+            if (!e.shiftKey) openUndoModal();
+            else if (undoRecords.length) undoRecordNow(undoRecords[undoRecords.length - 1].id);
             return;
         }
         if (playlistItemsEl && listArrowNav(playlistItemsEl, e)) return;
@@ -1916,11 +2252,23 @@ function applyFileBrowserViewMode(){
 }
 const toastHost = document.getElementById("toastHost");
 
-function showToast(msg, kind, ms){
+function showToast(msg, kind, ms, action){
     if (!toastHost) return;
     const t = document.createElement("div");
     t.className = "toast" + (kind ? ` ${kind}` : "");
     t.textContent = String(msg || "");
+    if (action){
+        const actionBtn = document.createElement("button");
+        actionBtn.type = "button";
+        actionBtn.className = "toast-action";
+        actionBtn.textContent = action.label;
+        if (action.title) actionBtn.title = action.title;
+        actionBtn.addEventListener("click", () => {
+            dismissToast(t);
+            action.onClick();
+        });
+        t.appendChild(actionBtn);
+    }
     toastHost.appendChild(t);
     requestAnimationFrame(() => t.classList.add("show"));
     if (ms === Infinity) return t;
@@ -2853,6 +3201,10 @@ function connectWS(){
                     "nothing is loaded": "Nothing is loaded",
                     "nothing to skip to": "Nothing to skip to",
                     "playlist control not allowed": "Playlist control is disabled",
+                    "playlist undo not allowed": "Undo is disabled",
+                    "nothing to undo": "Nothing to undo",
+                    "already restored": "That's already back in the playlist",
+                    "undo gone": "That's already been put back, or it aged out of the history",
                     "id required": "Something went wrong",
                     "val required": "Something went wrong",
                     "unknown op": "Something went wrong",
@@ -2898,6 +3250,13 @@ function connectWS(){
                 return;
             }
 
+            if (msg.type === "undo"){
+                const undoData = msg.data || {};
+                undoHistorySize = Number(undoData.size) || 0;
+                applyUndoHistory(Array.isArray(undoData.records) ? undoData.records : []);
+                return;
+            }
+
             if (msg.type === "status"){
                 window.__lastStatus = msg.data;
                 if (sid) applyStatus(msg.data || {});
@@ -2912,6 +3271,7 @@ function connectWS(){
                 }
                 if (_cmdLock && _cmdLock.expect === "playlist") _unlockCommand();
                 renderPlaylist();
+                if (isUndoOpen()) renderUndoModal();
                 if (isFileBrowserOpen() && fileBrowserState.rootId){
                     reconcileFileBrowserEntriesFromPlaylist();
                     renderFileBrowser();
@@ -2966,6 +3326,13 @@ function setupKeyboardShortcuts(){
             if (isResumeOpen()) return;
             e.preventDefault(); e.stopPropagation();
             if (isPlaylistOpen()) closePlaylist(); else openPlaylist();
+            return;
+        }
+        if (key === "u" || key === "U"){
+            if (!playlistUndoAvailable()) return;
+            e.preventDefault(); e.stopPropagation();
+            if (!e.shiftKey) openUndoModal();
+            else if (undoRecords.length) undoRecordNow(undoRecords[undoRecords.length - 1].id);
             return;
         }
 

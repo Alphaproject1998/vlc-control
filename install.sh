@@ -321,6 +321,7 @@ SCHEMA = {
     ("system", "http_access_log"): ("bool",),
     ("system", "client_id_style"): ("enum", ["numeric", "cid", "short_cid", "ip"]),
     ("system", "nickname_max_length"): ("int_min", 1),
+    ("system", "undo_history_size"): ("int_min", 1),
     ("system", "action_debounce_ms"): ("int_min", 0),
     ("file_browse", "enabled"): ("bool",),
     ("file_browse", "auto"): ("bool",),

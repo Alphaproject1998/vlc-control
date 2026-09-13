@@ -63,6 +63,10 @@ client_id_style = "numeric"
 # Max length for guest nicknames
 nickname_max_length = 24
 
+# How many removals the undo history keeps. A bulk remove or a clear counts as one.
+# Once it fills up the oldest drops off. Removals the host makes inside VLC are kept too.
+undo_history_size = 20
+
 # Debounce window (ms) for play/pause/stop when multiple sources act at once.
 # If VLC's own state changes during the window, the host wins and buffered client commands are dropped.
 # Otherwise one buffered client is chosen at random.
@@ -160,6 +164,14 @@ resume_prompt = true
 # Show a confirmation dialog before removing items from the playlist
 remove_prompt = true
 
+# [server] Let clients put removed items back from a shared undo history (size set by system.undo_history_size).
+# Items come back at the end of the playlist, VLC's HTTP API has no way to put them back in place
+playlist_undo = true
+
+# Confirm before the quick undos (the toast's Undo button and Shift+U).
+# The undo history modal does not ask.
+undo_prompt = true
+
 # Enable keyboard shortcuts in the browser (space=play/pause, arrows=seek, etc.)
 keyboard_events = true
 
@@ -251,6 +263,7 @@ seek_jumps = true     # -Xs / +Xs skip buttons (duration set by config.seek_jump
 playlist = true       # open playlist button
 clear_playlist = true # clear all tracks button inside the playlist modal
 remove_track = true   # per-row remove button inside the playlist modal
+undo_remove = true    # undo history button inside the playlist modal
 add_file = true       # add-to-playlist button on file browser entries
 play_file = true      # play-now button on file browser entries
 

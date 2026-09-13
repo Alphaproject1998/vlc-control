@@ -82,7 +82,7 @@ On startup it will:
 6. Check the bridge is alive and answering, then print the share link
 
 ```
-vlc-control 0.5.2 (<commit hash><"+" if files are modified>)
+vlc-control 0.6.0 (<commit hash><"+" if files are modified>)
 Installed:  10 Aug 2026, 07:20 (2 hours ago)
 Updated:    09 Aug 2026, 09:17 (1 day ago)
 
@@ -218,6 +218,8 @@ These work when the browser window is focused and `keyboard_events` is enabled:
 | `N` | Next track |
 | `P` | Previous track |
 | `Q` | Open / close the playlist |
+| `U` | Open the undo history (also works inside the playlist) |
+| `Shift+U` | Put back the most recent removal |
 | `Arrow Left` | Seek back (by `seek_jump_by` seconds) |
 | `Arrow Right` | Seek forward (by `seek_jump_by` seconds) |
 

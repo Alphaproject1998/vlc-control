@@ -29,7 +29,7 @@ except ImportError:
         tomllib = None  # type: ignore[assignment]
 
 
-VERSION = "0.5.2"
+VERSION = "0.6.0"
 
 
 def _load_config() -> dict:
@@ -66,6 +66,10 @@ _ACTOR_IDENTITY = {"host": "Host", "vlc": "VLC", "system": "System"}
 _ERROR_REASONS = {
     "seeking_not_allowed": "seeking is disabled",
     "playlist_control_not_allowed": "playlist control is disabled",
+    "playlist_undo_not_allowed": "undo is disabled",
+    "nothing_to_undo": "there was nothing to undo",
+    "already_restored": "everything was already back in the playlist",
+    "undo_gone": "it had already been put back or aged out of the history",
     "nothing_loaded": "nothing is loaded",
     "nothing_to_skip_to": "nothing to skip to",
     "unknown_op": "unknown command",
@@ -79,6 +83,7 @@ _ERROR_OPS = {
     "playlist/play": "play an item",
     "playlist/remove": "remove an item",
     "playlist/clear": "clear the playlist",
+    "playlist/undo": "undo a removal",
     "set_nickname": "set a nickname",
 }
 _VLC_FAULTS = {
@@ -185,6 +190,10 @@ def _tail_format(line: str) -> str | None:
         return out(tag, f"{identity} removed \"{value}\" from the playlist")
     if op == "playlist_remove_many":
         return out(tag, f"{identity} removed {value} files from the playlist")
+    if op == "playlist_undo":
+        return out(tag, f"{identity} put \"{value}\" back in the playlist")
+    if op == "playlist_undo_many":
+        return out(tag, f"{identity} put {value} files back in the playlist")
     if op == "playlist_clear":
         return out(tag, f"{identity} cleared the playlist")
     return unrendered()
@@ -259,9 +268,11 @@ _setup_access_log()
 CLIENT_ID_STYLE = str(_SYS.get("client_id_style", "numeric")).strip().lower()
 ACTION_DEBOUNCE_MS = int(_SYS.get("action_debounce_ms", 250))
 NICKNAME_MAX_LENGTH = int(_SYS.get("nickname_max_length", 24))
+UNDO_HISTORY_SIZE = max(1, int(_SYS.get("undo_history_size", 20)))
 
 ALLOW_SEEKING: bool = bool(_FEAT.get("allow_seeking", True))
 ALLOW_PLAYLIST_CONTROL: bool = bool(_FEAT.get("playlist_control", True))
+PLAYLIST_UNDO: bool = bool(_FEAT.get("playlist_undo", True))
 
 FILE_BROWSE: bool = bool(_FB.get("enabled", False))
 FILE_BROWSE_AUTO: bool = bool(_FB.get("auto", True))
@@ -399,6 +410,11 @@ _sessions: dict[str, tuple] = {}      # sid -> (ws, cid)
 _sessions_lock = threading.Lock()
 
 _pending_action: dict | None = None
+
+_undo_history: list[dict] = []        # oldest first: {id, cid, identity, op, at, items: [{key, id, uri, name, index}]}
+_undo_record_counter = 0
+_expected_removals: dict[str, float] = {}
+_undo_lock = threading.Lock()
 
 _TRACK_OPS = frozenset({
     "next", "prev", "playlist_skip", "playlist_resume",
@@ -856,6 +872,7 @@ _vlc_reachable: bool = True
 _vlc_lost_reason: str = ""
 _last_playlist_json: str | None = None
 _last_playlist: list[dict] = []
+_playlist_diff_ready = False
 _current_playing_dir_cache: str | None = None
 _auto_root_last_log: str = ""
 
@@ -870,7 +887,7 @@ def _note_auto_miss(reason: str, **kv) -> None:
 
 
 def broadcaster_loop() -> None:
-    global _last_seen, _last_seen_mono, _last_playlist_json, _last_playlist, _current_playing_dir_cache, _pending_action, _vlc_reachable, _vlc_lost_reason
+    global _last_seen, _last_seen_mono, _last_playlist_json, _last_playlist, _current_playing_dir_cache, _pending_action, _vlc_reachable, _vlc_lost_reason, _playlist_diff_ready
 
     while True:
         time.sleep(0.75)
@@ -887,6 +904,7 @@ def broadcaster_loop() -> None:
         if not all_ws and not LOG_WHEN_IDLE:
             _last_seen = None
             _last_seen_mono = None
+            _playlist_diff_ready = False
             continue
 
         status: dict | None = None
@@ -1006,6 +1024,7 @@ def broadcaster_loop() -> None:
         except Exception as exc:
             _last_seen = None
             _last_seen_mono = None
+            _playlist_diff_ready = False
             lost_reason = type(exc).__name__
             if _vlc_reachable or lost_reason != _vlc_lost_reason:
                 _vlc_reachable = False
@@ -1029,6 +1048,9 @@ def broadcaster_loop() -> None:
         playlist_payload: str | None = None
         try:
             playlist_items = read_playlist()
+            if status is not None and _playlist_diff_ready:
+                _record_host_removals(_last_playlist, playlist_items)
+            _playlist_diff_ready = status is not None
             if status is not None:
                 _update_session_progress(status, playlist_items)
             playlist_items = _apply_progress(playlist_items)
@@ -1062,7 +1084,7 @@ def broadcaster_loop() -> None:
                 _last_playlist_json = playlist_json
                 playlist_payload = json.dumps({"type": "playlist", "data": playlist_items})
         except Exception:
-            pass
+            _playlist_diff_ready = False
 
         dead = []
         for ws in all_ws:
@@ -1124,6 +1146,160 @@ def _playlist_name_for_id(items: list[dict], playlist_id: str) -> str:
     return ""
 
 
+def _removed_entries(items: list[dict], ids: list[str]) -> list[dict]:
+    wanted = set(ids)
+    return [
+        {"id": str(item.get("id") or ""), "uri": item.get("uri") or "", "name": item.get("name") or "", "index": index}
+        for index, item in enumerate(items)
+        if str(item.get("id") or "") in wanted and item.get("uri")
+    ]
+
+
+def _undo_message(for_cid: str) -> str:
+    with _undo_lock:
+        records = [
+            {
+                "id": record["id"],
+                "op": record["op"],
+                "who": record["identity"],
+                "host": record["cid"] is None,
+                "mine": record["cid"] is not None and record["cid"] == for_cid,
+                "at": record["at"],
+                "items": [{"key": entry["key"], "uri": entry["uri"], "name": entry["name"]} for entry in record["items"]],
+            }
+            for record in _undo_history
+        ]
+    return json.dumps({"type": "undo", "data": {"records": records, "size": UNDO_HISTORY_SIZE}})
+
+
+def broadcast_undo() -> None:
+    with _lock:
+        targets = [(target_cid, list(ws_set)) for target_cid, ws_set in _active.items()]
+    for target_cid, ws_list in targets:
+        payload = _undo_message(target_cid)
+        for ws in ws_list:
+            _ws_send_safe(ws, payload)
+
+
+def _expect_removals(uris: list[str]) -> None:
+    now = time.monotonic()
+    with _undo_lock:
+        for uri in uris:
+            _expected_removals[uri] = now
+
+
+def _unexpect_removals(uris: list[str]) -> None:
+    with _undo_lock:
+        for uri in uris:
+            _expected_removals.pop(uri, None)
+
+
+def _vlc_call_expecting_removals(uris: list[str], params: dict) -> None:
+    _expect_removals(uris)
+    try:
+        vlc_get("/requests/status.xml", params=params)
+    except Exception:
+        _unexpect_removals(uris)
+        raise
+
+
+def _record_removal(cid: str | None, op: str, entries: list[dict]) -> None:
+    global _undo_record_counter
+    if not PLAYLIST_UNDO or not entries:
+        return
+    identity = _client_identity(cid) if cid else "Host"
+    with _undo_lock:
+        _undo_record_counter += 1
+        _undo_history.append({
+            "id": _undo_record_counter,
+            "cid": cid,
+            "identity": identity,
+            "op": op,
+            "at": _now(),
+            "items": [dict(entry, key=key) for key, entry in enumerate(entries)],
+        })
+        del _undo_history[:-UNDO_HISTORY_SIZE]
+    broadcast_undo()
+
+
+def _record_host_removals(previous: list[dict], current: list[dict]) -> None:
+    current_uris = {item.get("uri") for item in current}
+    now = time.monotonic()
+    vanished = []
+    with _undo_lock:
+        for uri, marked_at in list(_expected_removals.items()):
+            if now - marked_at > 10.0:
+                _expected_removals.pop(uri, None)
+        for index, item in enumerate(previous):
+            uri = item.get("uri") or ""
+            if not uri or uri in current_uris:
+                continue
+            if _expected_removals.pop(uri, None) is not None:
+                continue
+            vanished.append({"id": str(item.get("id") or ""), "uri": uri, "name": item.get("name") or "", "index": index})
+    if not vanished:
+        return
+
+    op = "clear" if not current and len(vanished) > 1 else "remove"
+    if op == "clear":
+        log_event("action", who="host", identity="Host", op="playlist_clear")
+    elif len(vanished) == 1:
+        log_event("action", who="host", identity="Host", op="playlist_remove",
+                  value=(vanished[0]["name"] or vanished[0]["uri"]))
+    else:
+        log_event("action", who="host", identity="Host", op="playlist_remove_many", value=len(vanished))
+    _record_removal(None, op, vanished)
+
+
+def _parse_undo_picks(raw) -> dict[int, set[int] | None]:
+    picks: dict[int, set[int] | None] = {}
+    if not isinstance(raw, list):
+        return picks
+    for pick in raw:
+        if not isinstance(pick, dict):
+            continue
+        try:
+            record_id = int(pick.get("record"))
+            items = pick.get("items")
+            picks[record_id] = None if items is None else {int(key) for key in items}
+        except (ValueError, TypeError):
+            continue
+    return picks
+
+
+def _take_undo_items(picks: dict[int, set[int] | None]) -> tuple[list[tuple[dict, dict]], bool]:
+    in_playlist = {item.get("uri") for item in _last_playlist}
+    restoring: list[tuple[dict, dict]] = []
+    found = False
+    with _undo_lock:
+        for record in list(_undo_history):
+            if record["id"] not in picks:
+                continue
+            wanted = picks[record["id"]]
+            taken = [entry for entry in record["items"] if wanted is None or entry["key"] in wanted]
+            if not taken:
+                continue
+            found = True
+            taken_keys = {entry["key"] for entry in taken}
+            record["items"] = [entry for entry in record["items"] if entry["key"] not in taken_keys]
+            if not record["items"]:
+                _undo_history.remove(record)
+            restoring.extend((record, entry) for entry in taken if entry["uri"] not in in_playlist)
+    return restoring, found
+
+
+def _return_undo_items(pairs: list[tuple[dict, dict]]) -> None:
+    with _undo_lock:
+        for record, entry in pairs:
+            record["items"].append(entry)
+            record["items"].sort(key=lambda item: item["key"])
+            if not any(existing is record for existing in _undo_history):
+                _undo_history.append(record)
+        _undo_history.sort(key=lambda record: record["id"])
+        del _undo_history[:-UNDO_HISTORY_SIZE]
+    broadcast_undo()
+
+
 @app.get("/api/playlist")
 def playlist():
     require_token()
@@ -1146,6 +1322,8 @@ def playlist_remove():
         abort(400, "Missing id")
 
     names = {playlist_id: _playlist_name_for_id(_last_playlist, playlist_id) for playlist_id in ids}
+    entries = _removed_entries(_last_playlist, ids)
+    _expect_removals([entry["uri"] for entry in entries])
     masking = _removes_current(_last_playlist, ids)
     if masking:
         _set_pending("playlist_remove", cid, value=ids[-1])
@@ -1166,6 +1344,10 @@ def playlist_remove():
     else:
         log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="playlist_remove_many",
                   value=len(removed))
+
+    removed_set = set(removed)
+    _unexpect_removals([entry["uri"] for entry in entries if entry["id"] not in removed_set])
+    _record_removal(cid, "remove", [entry for entry in entries if entry["id"] in removed_set])
 
     return jsonify({"removed": removed, "failed": failed})
 
@@ -1718,19 +1900,59 @@ def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
             if not playlist_id:
                 _ws_err(ws, op, "id required"); return
             name = _playlist_name_for_id(_last_playlist, playlist_id)
+            entries = _removed_entries(_last_playlist, [playlist_id])
             if _removes_current(_last_playlist, [playlist_id]):
                 _set_pending("playlist_remove", cid, value=playlist_id)
-            vlc_get("/requests/status.xml", params={"command": "pl_delete", "id": playlist_id})
+            _vlc_call_expecting_removals([entry["uri"] for entry in entries], {"command": "pl_delete", "id": playlist_id})
             log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="playlist_remove",
                       value=(name or playlist_id))
+            _record_removal(cid, "remove", entries)
 
         elif op == "playlist/clear":
             if not ALLOW_PLAYLIST_CONTROL:
                 log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="playlist_control_not_allowed")
                 _ws_err(ws, op, "playlist control not allowed"); return
+            entries = _removed_entries(_last_playlist, [str(item.get("id") or "") for item in _last_playlist])
             _set_pending("playlist_clear", cid)
-            vlc_get("/requests/status.xml", params={"command": "pl_empty"})
+            _vlc_call_expecting_removals([entry["uri"] for entry in entries], {"command": "pl_empty"})
             log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="playlist_clear")
+            _record_removal(cid, "clear", entries)
+
+        elif op == "playlist/undo":
+            if not ALLOW_PLAYLIST_CONTROL:
+                log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="playlist_control_not_allowed")
+                _ws_err(ws, op, "playlist control not allowed"); return
+            if not PLAYLIST_UNDO:
+                log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="playlist_undo_not_allowed")
+                _ws_err(ws, op, "playlist undo not allowed"); return
+            picks = _parse_undo_picks(data.get("picks"))
+            if not picks:
+                log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="nothing_to_undo")
+                _ws_err(ws, op, "nothing to undo"); return
+            restoring, found = _take_undo_items(picks)
+            if not found:
+                log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="undo_gone")
+                _ws_err(ws, op, "undo gone"); return
+            broadcast_undo()
+            if not restoring:
+                log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="already_restored")
+                _ws_err(ws, op, "already restored"); return
+
+            restoring.sort(key=lambda pair: (pair[0]["id"], pair[1]["index"]))
+            for position, (_, entry) in enumerate(restoring):
+                try:
+                    vlc_get("/requests/status.xml", params={"command": "in_enqueue", "input": entry["uri"]})
+                except Exception:
+                    _return_undo_items(restoring[position:])
+                    raise
+
+            if len(restoring) == 1:
+                entry = restoring[0][1]
+                log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="playlist_undo",
+                          value=(entry["name"] or entry["uri"]))
+            else:
+                log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="playlist_undo_many",
+                          value=len(restoring))
 
         else:
             log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="unknown_op")
@@ -1839,6 +2061,7 @@ def ws_route(ws):
         except Exception:
             initial_playlist = []
         _ws_send_safe(ws, json.dumps({"type": "playlist", "data": initial_playlist}))
+        _ws_send_safe(ws, _undo_message(cid))
     except Exception:
         pass
 
