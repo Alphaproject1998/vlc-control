@@ -63,6 +63,10 @@ client_id_style = "numeric"
 # Max length for guest nicknames
 nickname_max_length = 24
 
+# How many removals the undo history keeps. A bulk remove or a clear counts as one.
+# Once it fills up the oldest drops off. Removals the host makes inside VLC are kept too.
+undo_history_size = 20
+
 # Debounce window (ms) for play/pause/stop when multiple sources act at once.
 # If VLC's own state changes during the window, the host wins and buffered client commands are dropped.
 # Otherwise one buffered client is chosen at random.
@@ -106,6 +110,7 @@ show = ["version", "installed", "updated", "stale", "token", "steps", "ready", "
 
 [file_browse]
 # Master switch - must be true for the file browser to work at all
+# playlist_control must be on too, or there is nothing to do in here
 enabled = false
 
 # Automatically expose the directory of the currently-playing file as a browse root.
@@ -145,17 +150,27 @@ log_root_relative = true
 # client-side UI only and control behaviour inside the browser.
 
 [features]
-# [server] Allow clients to seek (scrub the playback position)
+# [server] Allow clients to seek (scrub the playback position).
 allow_seeking = true
 
-# [server] Allow clients to modify the playlist (play item, remove, clear)
+# [server] Allow clients to modify the playlist (play item, remove, clear).
+# Off hides the file browser too, adding and playing files is all it is for
 playlist_control = true
 
 # Show a resume prompt when re-opening a partially-watched item
+# Still works with allow_seeking off, the server resumes to the position it recorded
 resume_prompt = true
 
 # Show a confirmation dialog before removing items from the playlist
 remove_prompt = true
+
+# [server] Let clients put removed items back from a shared undo history (size set by system.undo_history_size).
+# Items come back at the end of the playlist, VLC's HTTP API has no way to put them back in place
+playlist_undo = true
+
+# Confirm before the quick undos (the toast's Undo button and Shift+U).
+# The undo history modal does not ask.
+undo_prompt = true
 
 # Enable keyboard shortcuts in the browser (space=play/pause, arrows=seek, etc.)
 keyboard_events = true
@@ -248,6 +263,7 @@ seek_jumps = true     # -Xs / +Xs skip buttons (duration set by config.seek_jump
 playlist = true       # open playlist button
 clear_playlist = true # clear all tracks button inside the playlist modal
 remove_track = true   # per-row remove button inside the playlist modal
+undo_remove = true    # undo history button inside the playlist modal
 add_file = true       # add-to-playlist button on file browser entries
 play_file = true      # play-now button on file browser entries
 

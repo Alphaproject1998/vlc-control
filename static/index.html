@@ -89,6 +89,7 @@
       <div class="playlist-empty" id="playlistEmpty">Playlist is empty.</div>
     </div>
     <div id="playlistModalFooter" class="modal-footer">
+      <button class="modal-footer-start" id="btnPlaylistUndo">↶ <span>Undo history</span></button>
       <button id="btnPlaylistAddFiles">➕ <span>Add files</span></button>
       <button class="danger" id="btnPlaylistClear">Clear playlist</button>
     </div>
@@ -154,6 +155,24 @@
         </div>
         <p id="clientNicknameError" class="client-nickname-error" hidden></p>
       </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="undoModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="undoModalTitle">
+    <div class="modal-header">
+      <h2 id="undoModalTitle">Undo history</h2>
+      <button class="icon-btn" id="btnUndoClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="undoModalBody">
+      <p class="undo-hint"><span id="undoCapacity"></span> Pick what to put back. It goes back at the end of the playlist.</p>
+      <ul class="playlist-list undo-list" id="undoRecords"></ul>
+      <div class="playlist-empty" id="undoEmpty">Nothing to undo.</div>
+    </div>
+    <div class="modal-footer">
+      <button id="btnUndoCancel">Cancel</button>
+      <button class="primary" id="btnUndoRestore" disabled>Put back</button>
     </div>
   </div>
 </div>
