@@ -925,9 +925,73 @@ function updatePlaylistCountChip(){
     if (playlistCountChip.title !== title) playlistCountChip.title = title;
 }
 
+const _backLayers = [];
+let _backHistoryDepth = 0;
+let _backRewinding = false;
+let _backSyncQueued = false;
+
+history.replaceState({ backDepth: 0 }, "");
+
+function _syncBackHistory(){
+    _backSyncQueued = false;
+    if (_backRewinding) return;
+    const wanted = _backLayers.length;
+    if (wanted < _backHistoryDepth){
+        _backRewinding = true;
+        history.go(wanted - _backHistoryDepth);
+        return;
+    }
+    while (_backHistoryDepth < wanted){
+        _backHistoryDepth++;
+        history.pushState({ backDepth: _backHistoryDepth }, "");
+    }
+}
+
+function _queueBackSync(){
+    if (_backSyncQueued) return;
+    _backSyncQueued = true;
+    queueMicrotask(_syncBackHistory);
+}
+
+function pushBackLayer(name, onBack, view){
+    if (!view && _backLayers.some(layer => layer.name === name)) return;
+    _backLayers.push({ name, onBack, view });
+    _queueBackSync();
+}
+
+function dropBackLayers(test){
+    const before = _backLayers.length;
+    for (let i = _backLayers.length - 1; i >= 0; i--){
+        if (test(_backLayers[i])) _backLayers.splice(i, 1);
+    }
+    if (_backLayers.length !== before) _queueBackSync();
+}
+
+function releaseBackLayer(name){
+    dropBackLayers(layer => layer.name === name);
+}
+
+function hasBackLayer(name){
+    return _backLayers.some(layer => layer.name === name);
+}
+
+window.addEventListener("popstate", (e) => {
+    _backHistoryDepth = Number(e.state?.backDepth) || 0;
+    if (_backRewinding){
+        _backRewinding = false;
+        _syncBackHistory();
+        return;
+    }
+    const handlers = new Set();
+    while (_backLayers.length > _backHistoryDepth) handlers.add(_backLayers.pop().onBack);
+    for (const onBack of handlers) onBack();
+    _syncBackHistory();
+});
+
 function openPlaylist() {
     if(!playlistModal) return;
     playlistModal.hidden = false;
+    pushBackLayer("playlist", closePlaylist);
     if (_cmdLock) setModalLoading(document.getElementById("playlistModalBody"), "Working…");
     else if (!playlistLoaded) setModalLoading(document.getElementById("playlistModalBody"), "Loading playlist…");
     if (isKeyboardInput()) requestAnimationFrame(() => focusFirstPlaylistItem());
@@ -936,6 +1000,7 @@ function closePlaylist() {
     if(!playlistModal) return;
     playlistModal.hidden = true;
     if (playlistMultiActive) exitPlaylistMulti();
+    releaseBackLayer("playlist");
 }
 function isPlaylistOpen(){ return playlistModal && !playlistModal.hidden; }
 
@@ -1289,10 +1354,12 @@ function enterPlaylistMulti(){
     if (playlistMultiselectCheckEl) playlistMultiselectCheckEl.checked = true;
     if (playlistItemsEl) playlistItemsEl.classList.add("multiselect-active");
     updatePlaylistMultiToolbar();
+    pushBackLayer("playlistMulti", exitPlaylistMulti);
 }
 
 function exitPlaylistMulti(){
     playlistMultiActive = false;
+    releaseBackLayer("playlistMulti");
     playlistSelected.clear();
     if (playlistMultiselectCheckEl) playlistMultiselectCheckEl.checked = false;
     if (playlistItemsEl) playlistItemsEl.classList.remove("multiselect-active");
@@ -1468,12 +1535,14 @@ function openResumeModal(item){
     resumeBody.appendChild(nameEl);
     resumeBody.appendChild(msg);
     resumeModal.hidden = false;
+    pushBackLayer("resume", () => closeResumeModal("cancel"));
     if (isKeyboardInput()) requestAnimationFrame(() => { if (btnResumeContinue) btnResumeContinue.focus(); });
     return new Promise((resolve) => { resumeResolver = resolve; });
 }
 
 function closeResumeModal(choice){
     resumeModal.hidden = true;
+    releaseBackLayer("resume");
     const resolver = resumeResolver;
     resumeResolver = null;
     if(resolver) resolver(choice);
@@ -1696,6 +1765,7 @@ function openClientsModal(showHint, nicknameTaken){
         : "Set a nickname so others can see who's who (optional).";
     renderClientRoster();
     clientsModal.hidden = false;
+    if (!showHint) pushBackLayer("clients", closeClientsModal);
     startClientRosterTicker();
     if (isKeyboardInput()) requestAnimationFrame(() => clientNicknameInput.focus());
 }
@@ -1704,6 +1774,7 @@ function closeClientsModal(){
     clientsModal.hidden = true;
     clientsModalPendingSave = false;
     stopClientRosterTicker();
+    releaseBackLayer("clients");
     localStorage.setItem(NICKNAME_PROMPTED_KEY, "1");
 }
 
@@ -1888,12 +1959,14 @@ function openUndoModal(){
     if (!undoModal || !playlistUndoAvailable()) return;
     pruneUndoSelection();
     undoModal.hidden = false;
+    pushBackLayer("undo", closeUndoModal);
     renderUndoModal();
     if (isKeyboardInput()) requestAnimationFrame(() => undoRecordsEl?.querySelector("input:not(:disabled)")?.focus());
 }
 function closeUndoModal(){
     if (!undoModal) return;
     undoModal.hidden = true;
+    releaseBackLayer("undo");
 }
 function isUndoOpen(){ return undoModal && !undoModal.hidden; }
 
@@ -2296,6 +2369,7 @@ function openFileBrowser(){
     if (!fileBrowserModal) return;
     if (window.uiConfig.features?.fileBrowser === false) return;
     fileBrowserModal.hidden = false;
+    pushBackLayer("fileBrowser", closeFileBrowser);
     fileBrowserState = { rootId: null, rootLabel: "", path: "", entries: [], roots: [] };
     if (fileBrowserSearchEl) fileBrowserSearchEl.value = "";
     applyFileBrowserViewMode();
@@ -2307,6 +2381,8 @@ function closeFileBrowser(){
     if (!fileBrowserModal) return;
     fileBrowserModal.hidden = true;
     if (fileBrowserMultiActive) exitFileBrowserMulti();
+    releaseBackLayer("fileBrowserDir");
+    releaseBackLayer("fileBrowser");
 }
 function isFileBrowserOpen(){ return fileBrowserModal && !fileBrowserModal.hidden; }
 
@@ -2361,6 +2437,7 @@ async function loadFileBrowserRoots(){
             fileBrowserState.path = "";
             fileBrowserState.entries = fileBrowserState.roots.map(x => ({ name: x.label, type: "root", rootId: x.id }));
             renderFileBrowser();
+            syncFileBrowserBackLayers();
         }
     }catch(e){
         console.error("roots load failed", e);
@@ -2411,6 +2488,7 @@ async function loadFileBrowserDirectory(rootId, path){
         fileBrowserState.entries = Array.isArray(data.entries) ? data.entries : [];
         if (fileBrowserMultiActive) fileBrowserSelected.clear();
         renderFileBrowser();
+        syncFileBrowserBackLayers();
     }catch(e){
         console.error("dir load failed", e);
         showToast("Couldn't open that folder", "err");
@@ -2705,10 +2783,12 @@ function enterFileBrowserMulti(){
     if (fileBrowserMultiselectCheckEl) fileBrowserMultiselectCheckEl.checked = true;
     if (fileBrowserItemsEl) fileBrowserItemsEl.classList.add("multiselect-active");
     updateFileBrowserMultiToolbar();
+    pushBackLayer("fileBrowserMulti", exitFileBrowserMulti);
 }
 
 function exitFileBrowserMulti(){
     fileBrowserMultiActive = false;
+    releaseBackLayer("fileBrowserMulti");
     fileBrowserSelected.clear();
     if (fileBrowserMultiselectCheckEl) fileBrowserMultiselectCheckEl.checked = false;
     if (fileBrowserItemsEl) fileBrowserItemsEl.classList.remove("multiselect-active");
@@ -3033,6 +3113,33 @@ function fileBrowserGoBack(){
         return;
     }
     loadFileBrowserDirectory(fileBrowserState.rootId, fileBrowserParentPath(fileBrowserState.path));
+}
+
+function fileBrowserViewDepth(){
+    if (!fileBrowserState.rootId) return 0;
+    const segments = (fileBrowserState.path || "").split("/").filter(Boolean).length;
+    return segments + (fileBrowserState.roots.length > 1 ? 1 : 0);
+}
+
+function syncFileBrowserBackLayers(){
+    if (!isFileBrowserOpen()) return;
+    const { rootId, path } = fileBrowserState;
+    const depth = fileBrowserViewDepth();
+    dropBackLayers(layer => layer.name === "fileBrowserDir" && (
+        layer.view.depth > depth
+        || (layer.view.depth === depth && (layer.view.rootId !== rootId || layer.view.path !== path))
+    ));
+    if (depth === 0) return;
+    if (_backLayers.some(layer => layer.name === "fileBrowserDir" && layer.view.depth === depth)) return;
+    pushBackLayer("fileBrowserDir", restoreFileBrowserView, { rootId, path, depth });
+}
+
+function restoreFileBrowserView(){
+    if (!hasBackLayer("fileBrowser")) return;
+    const top = _backLayers.findLast(layer => layer.name === "fileBrowserDir");
+    if (top) loadFileBrowserDirectory(top.view.rootId, top.view.path);
+    else if (fileBrowserState.roots.length > 1) loadFileBrowserRoots();
+    else if (fileBrowserState.roots.length) loadFileBrowserDirectory(fileBrowserState.roots[0].id, "");
 }
 
 if (btnPlaylistAddFiles) btnPlaylistAddFiles.addEventListener("click", openFileBrowser);

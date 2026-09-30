@@ -29,7 +29,7 @@ except ImportError:
         tomllib = None  # type: ignore[assignment]
 
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 
 def _load_config() -> dict:
