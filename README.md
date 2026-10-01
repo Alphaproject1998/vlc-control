@@ -21,7 +21,9 @@ If `cloudflared` is installed, a Cloudflare quick tunnel is started automaticall
 ## Features
 
 - Play / pause / stop / previous / next / seek, live-synced to every connected browser
+- Loop and random order - see the current mode and change it: loop off, loop the playlist, or repeat one item, and random on or off
 - Playlist modal - view what's queued, skip to a track, remove tracks, clear, multi-select for bulk removal
+- Undo - removed tracks go into a shared history, so anyone can put back a removal or a clear, whole or item by item
 - File browser - let guests browse directories you've whitelisted and queue files, with search, list/grid views, extension grouping, and multi-select. Off by default
 - Resume prompts - reopening a partially-watched item asks whether to resume or start over
 - Nicknames - guests can pick a name; a roster modal shows who's connected and for how long
@@ -167,7 +169,7 @@ Everything lives in one file: `~/.config/vlc-control/config.toml`. It's heavily 
 | `[system]` | Server port, seats and grace period, VLC connection/launch, tunnel mode, logging, client identity, action debounce. Never sent to guests. |
 | `[status]` | Which version/install details the runner prints to the console on startup. Host-side only. |
 | `[file_browse]` | Whether guests can browse files at all, which directories, allowed extensions, blacklists. All enforced server-side. |
-| `[features]` | Feature switches. Flags marked `[server]` in the file (seeking, playlist control) block the API call itself, not just the button. |
+| `[features]` | Feature switches. Flags marked `[server]` in the file (seeking, playlist control, undo, loop, random order) block the API call itself, not just the button. |
 | `[layout]` | Show/hide individual UI sections - purely visual. |
 | `[buttons]` | Show/hide individual buttons - purely visual, use `[features]` to actually block an action. |
 | `[ui]` | Title, subtitle, and footer text guests see. |
@@ -217,6 +219,8 @@ These work when the browser window is focused and `keyboard_events` is enabled:
 | `Space` | Play / Pause |
 | `N` | Next track |
 | `P` | Previous track |
+| `L` | Cycle the loop mode: off, all, one |
+| `R` | Turn random order on / off |
 | `Q` | Open / close the playlist |
 | `U` | Open the undo history (also works inside the playlist) |
 | `Shift+U` | Put back the most recent removal |

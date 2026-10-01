@@ -336,6 +336,7 @@ SCHEMA = {
     ("config", "resume_max_percent"): ("int_range", 0, 100),
     ("config", "resume_tail_seconds"): ("int_min", 0),
     ("config", "file_browser_as_grid"): ("bool",),
+    ("layout", "playback_modes_position"): ("enum", ["auto", "label", "chips", "playlist", "none"]),
 }
 
 def check(section, key, kind, v):
@@ -384,10 +385,14 @@ for section, vals in cfg.items():
     if not isinstance(vals, dict):
         continue
     for key, v in vals.items():
-        if section in BOOL_SECTIONS:
-            check(section, key, "bool", v)
-        elif (section, key) in SCHEMA:
+        # if section in BOOL_SECTIONS:
+        #     check(section, key, "bool", v)
+        # elif (section, key) in SCHEMA:
+        #     check(section, key, SCHEMA[(section, key)][0], v)
+        if (section, key) in SCHEMA:
             check(section, key, SCHEMA[(section, key)][0], v)
+        elif section in BOOL_SECTIONS:
+            check(section, key, "bool", v)
 
 if cfg.get("config", {}).get("resume_min_percent", 0) >= cfg.get("config", {}).get("resume_max_percent", 100):
     warnings.append("config: resume_min_percent should be lower than resume_max_percent")

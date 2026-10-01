@@ -28,6 +28,8 @@ window.uiConfig = window.uiConfig || {
         showVersion: true,
         showPlaylist: true,
         showPlaylistPrevNext: true,
+        playbackModesPosition: "auto",
+        showPlaybackModesInPlaylist: false,
         showPlaylistProgressEntries: true,
         showPlaylistProgressTime: true,
         showPlaylistProgressTimeResume: true,
@@ -50,6 +52,8 @@ window.uiConfig = window.uiConfig || {
         clearPlaylist: true,
         removeTrack: true,
         undoRemove: true,
+        loop: true,
+        random: true,
         addFile: true,
         playFile: true
     },
@@ -63,6 +67,8 @@ window.uiConfig = window.uiConfig || {
         removePrompt: true,
         playlistUndo: true,
         undoPrompt: true,
+        loopControl: true,
+        randomControl: true,
         playlistSelectMulti: true,
         fileBrowserSelectMulti: true
     },
@@ -243,7 +249,7 @@ function applyUiConfigToDom(){
     if (lf) lf.textContent = `+${jump}s`;
 
     const showIcons = !(layout.showIcons === false);
-    document.querySelectorAll(".grid button, #btnPlaylistAddFiles, #btnPlaylistUndo").forEach(btn => {
+    document.querySelectorAll(".grid button:not(.mode-toggle), #btnPlaylistAddFiles, #btnPlaylistUndo").forEach(btn => {
         const first = btn.childNodes && btn.childNodes.length ? btn.childNodes[0] : null;
         if (first && first.nodeType === Node.TEXT_NODE){
             if (btn.dataset.iconText === undefined){
@@ -266,6 +272,7 @@ function applyUiConfigToDom(){
         ["btnPrev","btnNext"],
         ["btnBack","btnFwd"],
     ]);
+    placeModeToggles();
 
     const canRemove = playlistControl && !(buttonsConfig.removeTrack === false);
     const canAdd = playlistControl && !(buttonsConfig.addFile === false);
@@ -368,7 +375,7 @@ function setUiBusy(on, label){
         el.disabled = !!on;
     }
 
-    document.querySelectorAll(".modal button:not([aria-label='Close'])").forEach(btn => { btn.disabled = !!on; });
+    document.querySelectorAll(".modal button:not([aria-label='Close']):not(.mode-toggle)").forEach(btn => { btn.disabled = !!on; });
     const playlistModalEl = document.getElementById("playlistModal");
     if (playlistModalEl) playlistModalEl.classList.toggle("busy", !!on);
     const fileBrowserModalEl = document.getElementById("fileBrowserModal");
@@ -647,6 +654,7 @@ if (clockEl){
 function lockUI(reason, cooldownSec=0){
     sid = "";
     setControlsBusy(true);
+    renderModeButtons();
     if (seekBarEl) seekBarEl.disabled = true;
 
     closePlaylist();
@@ -704,6 +712,7 @@ function unlockUI(){
     const fileBrowserModalEl = document.getElementById("fileBrowserModal");
     if (fileBrowserModalEl) fileBrowserModalEl.classList.remove("busy");
     updatePlayPauseButtonFromState((lastStatus && lastStatus.state) || "unknown");
+    renderModeButtons();
 }
 
 function applyStatus(status){
@@ -758,6 +767,8 @@ function applyStatus(status){
         updateSeekFill();
     }
 
+    settleModePending();
+    renderModeButtons();
     updatePrevNextHints();
     if (newState !== prevState) renderPlaylist();
 }
@@ -885,6 +896,144 @@ if (btnStop)   btnStop.addEventListener("click", () => sendApiCommand("stop"));
 
 if (btnBack) btnBack.addEventListener("click", () => seekBy(-getSeekJumpBy()));
 if (btnFwd)  btnFwd.addEventListener("click", () => seekBy(getSeekJumpBy()));
+
+const LOOP_MODES = ["off", "all", "one"];
+const LOOP_MODE_HINTS = {
+    off: "Loop is off, playback stops after the last item",
+    all: "Looping the whole playlist",
+    one: "Repeating the current item",
+};
+const MODE_OPS = new Set(["loop", "random"]);
+const _modePending = new Map();
+const _narrowScreen = window.matchMedia("(max-width: 520px)");
+
+function createModeToggle(name){
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "mode-toggle";
+    toggle.dataset.mode = name;
+    const iconEl = document.createElement("span");
+    iconEl.className = "mode-icon";
+    toggle.appendChild(iconEl);
+    toggle.addEventListener("click", name === "loop" ? cycleLoopMode : toggleRandomMode);
+    return toggle;
+}
+
+const _mainModeToggles = { loop: createModeToggle("loop"), random: createModeToggle("random") };
+const _playlistModeToggles = { loop: createModeToggle("loop"), random: createModeToggle("random") };
+const _allModeToggles = [...Object.values(_mainModeToggles), ...Object.values(_playlistModeToggles)];
+
+function playbackModesFromStatus(status){
+    const loop = status.repeat ? "one" : status.loop ? "all" : "off";
+    return { loop, random: status.random ? "on" : "off" };
+}
+
+function currentPlaybackModes(){
+    const modes = playbackModesFromStatus(lastStatus || {});
+    for (const [name, pending] of _modePending) modes[name] = pending.value;
+    return modes;
+}
+
+function clearModePending(name){
+    const pending = _modePending.get(name);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    _modePending.delete(name);
+}
+
+function settleModePending(){
+    const actual = playbackModesFromStatus(lastStatus || {});
+    for (const [name, pending] of _modePending){
+        if (actual[name] === pending.value) clearModePending(name);
+    }
+}
+
+function modeControlAllowed(name){
+    const features = window.uiConfig.features || {};
+    return name === "loop" ? !(features.loopControl === false) : !(features.randomControl === false);
+}
+
+function placeModeToggles(){
+    const layout = window.uiConfig.layout || {};
+    const buttonsConfig = window.uiConfig.buttons || {};
+    const position = String(layout.playbackModesPosition || "auto").toLowerCase();
+    const resolved = position === "auto" ? (_narrowScreen.matches ? "label" : "chips") : position;
+    const slotIds = {
+        label: ["modeSlotLabel", "modeSlotLabel"],
+        chips: ["modeSlotChips", "modeSlotChips"],
+        playlist: ["modeSlotPlaylistStart", "modeSlotPlaylistEnd"],
+    }[resolved];
+    const showInPlaylist = layout.showPlaybackModesInPlaylist === true;
+    const playlistSlot = document.getElementById("modeSlotPlaylistModal");
+
+    ["loop", "random"].forEach((name, index) => {
+        const shown = !(buttonsConfig[name] === false);
+        const mainToggle = _mainModeToggles[name];
+        const mainSlot = slotIds ? document.getElementById(slotIds[index]) : null;
+        if (shown && mainSlot) mainSlot.appendChild(mainToggle);
+        else mainToggle.remove();
+
+        const playlistToggle = _playlistModeToggles[name];
+        if (shown && showInPlaylist && playlistSlot) playlistSlot.appendChild(playlistToggle);
+        else playlistToggle.remove();
+    });
+
+    const playlistRow = document.getElementById("playlistRow");
+    if (playlistRow){
+        const rowUsed = btnPlaylist?.style.display !== "none" || playlistRow.querySelector(".mode-toggle");
+        playlistRow.style.display = rowUsed ? "" : "none";
+        setClass(playlistRow, "with-modes", !!playlistRow.querySelector(".mode-toggle"));
+    }
+    renderModeButtons();
+}
+
+_narrowScreen.addEventListener("change", placeModeToggles);
+
+function renderModeToggle(toggle, modes){
+    const name = toggle.dataset.mode;
+    const value = modes[name];
+    const on = value !== "off";
+    const icon = name === "loop" ? (value === "one" ? "🔂" : "🔁") : "🔀";
+    const hint = name === "loop"
+        ? LOOP_MODE_HINTS[value]
+        : (on ? "Playing in random order" : "Playing in playlist order");
+    const allowed = modeControlAllowed(name);
+    const title = allowed ? hint : `${hint} (only the host can change this)`;
+
+    setText(toggle.querySelector(".mode-icon"), icon);
+    setAttrIfChanged(toggle, "aria-pressed", on ? "true" : "false");
+    setAttrIfChanged(toggle, "aria-label", title);
+    if (toggle.title !== title) toggle.title = title;
+    const disabled = !sid || !allowed;
+    if (toggle.disabled !== disabled) toggle.disabled = disabled;
+}
+
+function renderModeButtons(){
+    const modes = currentPlaybackModes();
+    for (const toggle of _allModeToggles) renderModeToggle(toggle, modes);
+}
+
+function setPlaybackMode(name, value){
+    if (!sid || !modeControlAllowed(name)) return;
+    if (!wsSend(name, { val: value })) return;
+    clearModePending(name);
+    const timer = setTimeout(() => {
+        _modePending.delete(name);
+        renderModeButtons();
+    }, 2500);
+    _modePending.set(name, { value, timer });
+    renderModeButtons();
+    updatePrevNextHints();
+}
+
+function cycleLoopMode(){
+    const current = currentPlaybackModes().loop;
+    setPlaybackMode("loop", LOOP_MODES[(LOOP_MODES.indexOf(current) + 1) % LOOP_MODES.length]);
+}
+
+function toggleRandomMode(){
+    setPlaybackMode("random", currentPlaybackModes().random === "on" ? "off" : "on");
+}
 
 //TODO: Improve modal display, fade/animation?
 //TODO: Global modal handler.
@@ -1147,7 +1296,9 @@ function updatePrevNextHints() {
     if (showHints){
         const count = playlistItems.length;
         const currentIndex = playlistItems.findIndex(it => it.isCurrent);
-        const random = !!(window.__lastStatus && window.__lastStatus.random);
+        // const random = !!(window.__lastStatus && window.__lastStatus.random);
+        const modes = currentPlaybackModes();
+        const random = modes.random === "on";
 
         if (random && count > 0 && currentIndex >= 0){
             prevTitle = "Previous: (random)";
@@ -1157,8 +1308,11 @@ function updatePrevNextHints() {
             const nextItem = (currentIndex === count - 1) ? playlistItems[0] : playlistItems[currentIndex + 1];
             const prevWraps = (currentIndex === 0);
             const nextWraps = (currentIndex === count - 1);
-            prevTitle = `Previous: ${prevItem.name}${prevWraps ? " (wrap to end)" : ""}`;
-            nextTitle = `Next: ${nextItem.name}${nextWraps ? " (wrap to start)" : ""}`;
+            // prevTitle = `Previous: ${prevItem.name}${prevWraps ? " (wrap to end)" : ""}`;
+            // nextTitle = `Next: ${nextItem.name}${nextWraps ? " (wrap to start)" : ""}`;
+            const wraps = modes.loop === "all";
+            prevTitle = prevWraps && !wraps ? "Previous: nothing before this" : `Previous: ${prevItem.name}${prevWraps ? " (wrap to end)" : ""}`;
+            nextTitle = nextWraps && !wraps ? "Next: nothing after this" : `Next: ${nextItem.name}${nextWraps ? " (wrap to start)" : ""}`;
         }
     }
 
@@ -3279,6 +3433,7 @@ function connectWS(){
             }
 
             if (msg.type === "cmd_ack"){
+                if (MODE_OPS.has(msg.op)) return;
                 if (_cmdLock && (_cmdLock.expect === "state" || _cmdLock.expect === "nav")) _unlockCommand();
                 return;
             }
@@ -3299,7 +3454,11 @@ function connectWS(){
                     clientNicknameError.hidden = false;
                     return;
                 }
-                if (_cmdLock) {
+                if (MODE_OPS.has(msg.op)){
+                    clearModePending(msg.op);
+                    renderModeButtons();
+                    updatePrevNextHints();
+                } else if (_cmdLock) {
                     if (_cmdLock.expect === "seek") _optimisticSeekSec = null;
                     _unlockCommand();
                 }
@@ -3309,6 +3468,8 @@ function connectWS(){
                     "nothing to skip to": "Nothing to skip to",
                     "playlist control not allowed": "Playlist control is disabled",
                     "playlist undo not allowed": "Undo is disabled",
+                    "loop control not allowed": "Changing the loop mode is disabled",
+                    "random control not allowed": "Changing random order is disabled",
                     "nothing to undo": "Nothing to undo",
                     "already restored": "That's already back in the playlist",
                     "undo gone": "That's already been put back, or it aged out of the history",
@@ -3427,6 +3588,14 @@ function setupKeyboardShortcuts(){
         }
         if (key === "p" || key === "P"){
             sendApiCommand("prev");
+            return;
+        }
+        if (key === "l" || key === "L"){
+            cycleLoopMode();
+            return;
+        }
+        if (key === "r" || key === "R"){
+            toggleRandomMode();
             return;
         }
         if (key === "q" || key === "Q"){

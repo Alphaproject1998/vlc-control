@@ -172,6 +172,14 @@ playlist_undo = true
 # The undo history modal does not ask.
 undo_prompt = true
 
+# [server] Allow clients to change the loop mode: off, loop the whole playlist, or repeat the current item.
+# Off still shows the current mode, the toggle just can't change it
+loop_control = true
+
+# [server] Allow clients to turn random order on and off.
+# Off still shows whether it's on, the toggle just can't change it
+random_control = true
+
 # Enable keyboard shortcuts in the browser (space=play/pause, arrows=seek, etc.)
 keyboard_events = true
 
@@ -225,6 +233,15 @@ show_version = true
 show_playlist = true
 # Show previous/next track names in button tooltips
 show_playlist_prev_next = true
+# Where the small loop and random order toggles sit on the main screen:
+#   auto     - next to "Now playing" on phones, in the status chips on wider screens
+#   label    - next to "Now playing"
+#   chips    - in the status chips
+#   playlist - either side of the Playlist button
+#   none     - not on the main screen
+playback_modes_position = "auto"
+# Also show the loop and random order toggles in the playlist's header
+show_playback_modes_in_playlist = false
 # Track count chip on the playlist button
 show_playlist_progress_entries = true
 # Progress timestamps (e.g. "4:12 / 1:23:45") on playlist rows
@@ -264,6 +281,8 @@ playlist = true       # open playlist button
 clear_playlist = true # clear all tracks button inside the playlist modal
 remove_track = true   # per-row remove button inside the playlist modal
 undo_remove = true    # undo history button inside the playlist modal
+loop = true           # loop toggle (off / all / one), also shows the current mode
+random = true         # random order toggle, also shows whether it's on
 add_file = true       # add-to-playlist button on file browser entries
 play_file = true      # play-now button on file browser entries
 

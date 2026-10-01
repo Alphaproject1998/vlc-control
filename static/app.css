@@ -70,6 +70,16 @@ h1 { margin: 0; font-size: 18px; letter-spacing: .2px; }
     margin-bottom: 12px;
 }
 #nowPlaying .label { font-size: 12px; color: rgba(168,179,196,.85); margin-bottom: 6px; }
+.now-playing-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+#nowPlaying .now-playing-head .label {
+    margin-bottom: 0;
+}
 #nowPlaying .title {
     font-weight: 800;
     font-size: 14px;
@@ -94,6 +104,7 @@ h1 { margin: 0; font-size: 18px; letter-spacing: .2px; }
     border-radius: 999px;
     border: 1px solid var(--border);
     background: rgba(255,255,255,.03);
+    font-variant-numeric: tabular-nums;
 }
 
 .seek-bar-wrap {
@@ -219,6 +230,81 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .danger {
     background: linear-gradient(180deg, rgba(239,68,68,.26), rgba(239,68,68,.10));
     border-color: rgba(239,68,68,.35);
+}
+.playlist-row {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 12px;
+}
+.playlist-row #btnPlaylist {
+    flex: 1;
+}
+
+.mode-slot {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.mode-slot:empty {
+    display: none;
+}
+button.mode-toggle {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.4;
+    gap: 0;
+}
+button.mode-toggle:disabled {
+    opacity: 1;
+    cursor: default;
+}
+button.mode-toggle[aria-pressed="false"] .mode-icon {
+    opacity: .45;
+    filter: grayscale(1);
+}
+button.mode-toggle[aria-pressed="true"] {
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+button.mode-toggle[aria-pressed="true"]:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.playlist-row button.mode-toggle {
+    padding: 0 14px;
+    border-radius: 14px;
+    font-size: 16px;
+}
+.playlist-row.with-modes {
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: rgba(255,255,255,.03);
+    overflow: hidden;
+}
+.playlist-row.with-modes .mode-slot {
+    align-items: stretch;
+}
+.playlist-row.with-modes button {
+    border: 0;
+    border-radius: 0;
+}
+.playlist-row.with-modes button:not([aria-pressed="true"]):not(:hover) {
+    background: transparent;
+}
+.playlist-row.with-modes button.mode-toggle {
+    padding: 0 18px;
+}
+.playlist-row.with-modes #modeSlotPlaylistStart .mode-toggle {
+    border-right: 1px solid var(--border);
+}
+.playlist-row.with-modes #modeSlotPlaylistEnd .mode-toggle {
+    border-left: 1px solid var(--border);
+}
+.modal-header .mode-slot {
+    margin: 0 10px 0 auto;
 }
 
 .status {

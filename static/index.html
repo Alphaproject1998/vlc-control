@@ -29,7 +29,10 @@
 
     <div class="content">
       <div id="nowPlaying">
-        <div class="label">Now playing</div>
+        <div class="now-playing-head">
+          <div class="label">Now playing</div>
+          <span class="mode-slot" id="modeSlotLabel"></span>
+        </div>
         <div class="title" id="title">Waiting for a seat…</div>
 
         <div class="seek-bar-wrap" id="seekBarWrap">
@@ -40,6 +43,7 @@
               <span class="chip" id="state">Controls locked</span>
               <span class="chip" id="clock" title="Click to toggle remaining time" style="cursor:pointer;">0:00 / 0:00</span>
               <span class="chip" id="playlistCountChip" title="0 items in the playlist" style="cursor:pointer;" hidden>0</span>
+              <span class="mode-slot" id="modeSlotChips"></span>
             </div>
             <div class="chips">
               <span class="chip" id="clients" title="Click to view clients" style="cursor:pointer;">Clients: ?/?</span>
@@ -56,7 +60,11 @@
         <button id="btnNext">⏭️ <span>Next</span></button>
         <button id="btnBack">⟲ <span>-10s</span></button>
         <button id="btnFwd">⟳ <span>+10s</span></button>
-        <button id="btnPlaylist" style="grid-column: 1 / -1;">📜 <span>Playlist</span></button>
+        <div class="playlist-row" id="playlistRow">
+          <span class="mode-slot" id="modeSlotPlaylistStart"></span>
+          <button id="btnPlaylist">📜 <span>Playlist</span></button>
+          <span class="mode-slot" id="modeSlotPlaylistEnd"></span>
+        </div>
       </div>
 
       <div class="status">
@@ -74,6 +82,7 @@
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="playlistModalTitle">
     <div class="modal-header">
       <h2 id="playlistModalTitle">Playlist</h2>
+      <span class="mode-slot" id="modeSlotPlaylistModal"></span>
       <button class="icon-btn" id="btnPlaylistClose" aria-label="Close">✕</button>
     </div>
     <div class="modal-body" id="playlistModalBody">

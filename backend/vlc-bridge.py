@@ -29,7 +29,7 @@ except ImportError:
         tomllib = None  # type: ignore[assignment]
 
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 
 
 def _load_config() -> dict:
@@ -67,6 +67,9 @@ _ERROR_REASONS = {
     "seeking_not_allowed": "seeking is disabled",
     "playlist_control_not_allowed": "playlist control is disabled",
     "playlist_undo_not_allowed": "undo is disabled",
+    "loop_control_not_allowed": "loop control is disabled",
+    "random_control_not_allowed": "random order is disabled",
+    "bad_mode": "that isn't a mode it knows",
     "nothing_to_undo": "there was nothing to undo",
     "already_restored": "everything was already back in the playlist",
     "undo_gone": "it had already been put back or aged out of the history",
@@ -84,6 +87,8 @@ _ERROR_OPS = {
     "playlist/remove": "remove an item",
     "playlist/clear": "clear the playlist",
     "playlist/undo": "undo a removal",
+    "loop": "change the loop mode",
+    "random": "change random order",
     "set_nickname": "set a nickname",
 }
 _VLC_FAULTS = {
@@ -196,6 +201,12 @@ def _tail_format(line: str) -> str | None:
         return out(tag, f"{identity} put {value} files back in the playlist")
     if op == "playlist_clear":
         return out(tag, f"{identity} cleared the playlist")
+    if op == "loop_mode":
+        verb = {"off": "turned looping off", "all": "set the playlist to loop",
+                "one": "set the current item to repeat"}.get(value)
+        return out(tag, f"{identity} {verb}") if verb else unrendered()
+    if op == "random_mode":
+        return out(tag, f"{identity} turned random order {'on' if value == 'on' else 'off'}")
     return unrendered()
 
 
@@ -273,6 +284,8 @@ UNDO_HISTORY_SIZE = max(1, int(_SYS.get("undo_history_size", 20)))
 ALLOW_SEEKING: bool = bool(_FEAT.get("allow_seeking", True))
 ALLOW_PLAYLIST_CONTROL: bool = bool(_FEAT.get("playlist_control", True))
 PLAYLIST_UNDO: bool = bool(_FEAT.get("playlist_undo", True))
+LOOP_CONTROL: bool = bool(_FEAT.get("loop_control", True))
+RANDOM_CONTROL: bool = bool(_FEAT.get("random_control", True))
 
 FILE_BROWSE: bool = bool(_FB.get("enabled", False))
 FILE_BROWSE_AUTO: bool = bool(_FB.get("auto", True))
@@ -416,6 +429,11 @@ _undo_record_counter = 0
 _expected_removals: dict[str, float] = {}
 _undo_lock = threading.Lock()
 
+_MODE_COMMANDS = {"loop": "pl_loop", "repeat": "pl_repeat", "random": "pl_random"}
+_LOOP_MODES = ("off", "all", "one")
+_expected_modes: dict[str, tuple[str, float]] = {}  # "loop"/"random"
+_modes_lock = threading.Lock()
+
 _TRACK_OPS = frozenset({
     "next", "prev", "playlist_skip", "playlist_resume",
     "files_play", "files_play_existing",
@@ -451,6 +469,47 @@ def _vlc_get_pending(path: str, **kwargs):
     except Exception:
         _clear_pending()
         raise
+
+
+def _playback_modes(status: dict) -> dict[str, str]:
+    loop = "one" if status.get("repeat") else "all" if status.get("loop") else "off"
+    return {"loop": loop, "random": "on" if status.get("random") else "off"}
+
+
+def _mode_was_expected(name: str, value: str) -> bool:
+    expected = _expected_modes.get(name)
+    if expected is None:
+        return False
+    if time.monotonic() - expected[1] > 10.0:
+        _expected_modes.pop(name, None)
+        return False
+    if expected[0] != value:
+        return False
+    _expected_modes.pop(name, None)
+    return True
+
+
+def _set_playback_mode(cid: str, name: str, value: str, switches: dict[str, bool]) -> None:
+    with _modes_lock:
+        current = read_status_dict()
+
+        def pending_flips(state: dict) -> list[str]:
+            return sorted((key for key, on in switches.items() if bool(state.get(key)) != on),
+                          key=lambda key: not switches[key])
+
+        if not pending_flips(current):
+            return
+        _expected_modes[name] = (value, time.monotonic())
+        try:
+            for _ in range(len(switches) + 1):
+                flips = pending_flips(current)
+                if not flips:
+                    break
+                current = vlc_get("/requests/status.json", params={"command": _MODE_COMMANDS[flips[0]]}).json()
+        except Exception:
+            _expected_modes.pop(name, None)
+            raise
+    log_event("action", who="web", cid=cid, identity=_client_identity(cid), op=f"{name}_mode", value=value)
 
 
 def _ws_err(ws, op: str, msg: str) -> None:
@@ -1017,6 +1076,11 @@ def broadcaster_loop() -> None:
                         log_event("action", who="host", identity="Host", op="seek",
                                   at=at_s, length=len_s, value=f"{at_s}/{len_s}")
 
+                prev_modes = _playback_modes(_last_seen)
+                for name, value in _playback_modes(status).items():
+                    if value != prev_modes[name] and not _mode_was_expected(name, value):
+                        log_event("action", who="host", identity="Host", op=f"{name}_mode", value=value)
+
             _last_seen = status
             _last_seen_mono = tick_mono
             payload = json.dumps({"type": "status", "data": status})
@@ -1127,7 +1191,7 @@ def status():
 
 
 def _skip_is_dead_end(op: str) -> bool:
-    if bool((_last_seen or {}).get("loop")):
+    if bool((_last_seen or {}).get("loop")) or bool((_last_seen or {}).get("random")):
         return False
     index = next((i for i, item in enumerate(_last_playlist) if item.get("isCurrent")), -1)
     if index < 0:
@@ -1790,6 +1854,26 @@ def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
             if looping_single:
                 log_event("action", who="web", cid=cid, identity=_client_identity(cid), op=logged_op,
                           value=(_last_seen or {}).get("title"))
+
+        elif op == "loop":
+            if not LOOP_CONTROL:
+                log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="loop_control_not_allowed")
+                _ws_err(ws, op, "loop control not allowed"); return
+            mode = str(data.get("val") or "").strip().lower()
+            if mode not in _LOOP_MODES:
+                log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="bad_mode")
+                _ws_err(ws, op, "val required"); return
+            _set_playback_mode(cid, "loop", mode, {"loop": mode == "all", "repeat": mode == "one"})
+
+        elif op == "random":
+            if not RANDOM_CONTROL:
+                log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="random_control_not_allowed")
+                _ws_err(ws, op, "random control not allowed"); return
+            mode = str(data.get("val") or "").strip().lower()
+            if mode not in ("on", "off"):
+                log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="bad_mode")
+                _ws_err(ws, op, "val required"); return
+            _set_playback_mode(cid, "random", mode, {"random": mode == "on"})
 
         elif op == "set_nickname":
             nickname = str(data.get("nickname") or "").strip()[:NICKNAME_MAX_LENGTH]
