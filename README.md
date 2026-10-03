@@ -168,6 +168,7 @@ Everything lives in one file: `~/.config/vlc-control/config.toml`. It's heavily 
 | ------- | ---------------- |
 | `[system]` | Server port, seats and grace period, VLC connection/launch, tunnel mode, logging, client identity, action debounce. Never sent to guests. |
 | `[status]` | Which version/install details the runner prints to the console on startup. Host-side only. |
+| `[logging]` | How the live console log reads, such as how many names a bulk add or remove lists before "and N more". Host-side only, the log file always keeps every name. |
 | `[file_browse]` | Whether guests can browse files at all, which directories, allowed extensions, blacklists. All enforced server-side. |
 | `[features]` | Feature switches. Flags marked `[server]` in the file (seeking, playlist control, undo, loop, random order) block the API call itself, not just the button. |
 | `[layout]` | Show/hide individual UI sections - purely visual. |
@@ -205,6 +206,7 @@ Off by default. When enabled, guests can only see what you explicitly allow:
 - `auto` - expose the folder of the currently-playing file without revealing its real path
 - `extensions` - anything not in the list is hidden entirely
 - `blacklist_dirs` / `blacklist_terms` - hide directories and names you never want shown
+- `auto_blacklist` - whether the now-playing folder still opens when the playing file is somewhere blacklisted: `hide`, `allow` (lifts only what that file matched) or `ignore`
 
 All of it is validated server-side - path traversal is blocked and full paths never leave your machine, guests only ever see paths relative to a root.
 

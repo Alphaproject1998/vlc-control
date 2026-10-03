@@ -103,6 +103,16 @@ action_debounce_ms = 250
 show = ["version", "installed", "updated", "stale", "token", "steps", "ready", "logkey"]
 
 
+# ── Console log ───────────────────────────────────────────────────────────────
+# How the live log in the runner's console reads. Host-side only.
+# The log file in log_dir always keeps the full detail, whatever is set here.
+
+[logging]
+# How many names a bulk add, remove or undo lists under its count, one per line, before "and N more".
+# 0 lists every one.
+item_preview = 3
+
+
 # ── File browser ──────────────────────────────────────────────────────────────
 # Controls what parts of your filesystem guests can browse and queue.
 # All access is validated server-side against the roots and filters defined here
@@ -120,6 +130,15 @@ auto = true
 # Allow navigating into subdirectories of the auto-exposed folder.
 # false (default) = flat view, files in that one directory only
 auto_recursive = false
+
+# What the now-playing folder does when the playing file sits somewhere the blacklist covers.
+#   hide   - no now-playing folder at all, the blacklist wins
+#   allow  - the folder shows, and the blacklist entries the playing file matched are lifted inside it.
+#            Everything else in the blacklist still applies.
+#            Handy for a show you keep hidden but want guests to queue the next episodes of while it's on.
+#   ignore - the folder shows with no blacklist applied inside it at all (default)
+# Only the now-playing folder is affected; browsing the same place through dirs still follows the blacklist.
+auto_blacklist = "ignore"
 
 # Explicit root directories guests can browse.
 # Append /* to a path to allow navigating its subdirectories.

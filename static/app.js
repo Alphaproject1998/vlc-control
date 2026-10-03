@@ -3473,6 +3473,7 @@ function connectWS(){
                     "nothing to undo": "Nothing to undo",
                     "already restored": "That's already back in the playlist",
                     "undo gone": "That's already been put back, or it aged out of the history",
+                    "vlc unreachable": "VLC is not responding",
                     "id required": "Something went wrong",
                     "val required": "Something went wrong",
                     "unknown op": "Something went wrong",

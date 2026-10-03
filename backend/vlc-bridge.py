@@ -29,7 +29,7 @@ except ImportError:
         tomllib = None  # type: ignore[assignment]
 
 
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 
 
 def _load_config() -> dict:
@@ -101,7 +101,10 @@ _VLC_FAULTS = {
 }
 
 
-def _tail_format(line: str) -> str | None:
+_ITEM_SEPARATOR = "|"
+
+
+def _tail_format(line: str, item_preview: int = 3) -> str | None:
     parts = line.strip().split(" ")
     if len(parts) < 3 or parts[2] != "EVENT":
         return None
@@ -125,6 +128,17 @@ def _tail_format(line: str) -> str | None:
 
     def out(tag: str, msg: str) -> str:
         return f"[{time_str}] [{tag}] {msg}"
+
+    def listed(tag: str, msg: str) -> str:
+        names = [unquote(name) for name in kv.get("items", "").split(_ITEM_SEPARATOR) if name]
+        if not names:
+            return out(tag, msg)
+        indent = " " * (len(out(tag, "")) + 2)
+        shown = names[:item_preview] if item_preview > 0 else names
+        lines = [out(tag, f"{msg}:")] + [f"{indent}{name}" for name in shown]
+        if len(names) > len(shown):
+            lines.append(f"{indent}and {len(names) - len(shown)} more")
+        return "\n".join(lines)
 
     def unrendered() -> str | None:
         if os.environ.get("VLC_CONTROL_TAIL_DEBUG"):
@@ -187,18 +201,18 @@ def _tail_format(line: str) -> str | None:
     if op == "files_add":
         return out(tag, f"{identity} added \"{value}\" to the playlist")
     if op == "files_add_many":
-        return out(tag, f"{identity} added {value} files to the playlist")
+        return listed(tag, f"{identity} added {value} files to the playlist")
     if op in ("files_play", "files_play_existing", "files_play_resume",
               "files_play_resume_existing", "playlist_skip", "playlist_resume"):
         return out(tag, f"{identity} switched to \"{value}\"")
     if op == "playlist_remove":
         return out(tag, f"{identity} removed \"{value}\" from the playlist")
     if op == "playlist_remove_many":
-        return out(tag, f"{identity} removed {value} files from the playlist")
+        return listed(tag, f"{identity} removed {value} files from the playlist")
     if op == "playlist_undo":
         return out(tag, f"{identity} put \"{value}\" back in the playlist")
     if op == "playlist_undo_many":
-        return out(tag, f"{identity} put {value} files back in the playlist")
+        return listed(tag, f"{identity} put {value} files back in the playlist")
     if op == "playlist_clear":
         return out(tag, f"{identity} cleared the playlist")
     if op == "loop_mode":
@@ -210,9 +224,21 @@ def _tail_format(line: str) -> str | None:
     return unrendered()
 
 
+def _tail_item_preview() -> int:
+    try:
+        section = _load_config().get("logging")
+    except Exception:
+        return 3
+    value = section.get("item_preview", 3) if isinstance(section, dict) else 3
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 3
+    return value
+
+
 def _run_tail_mode() -> None:
+    item_preview = _tail_item_preview()
     for raw in sys.stdin:
-        rendered = _tail_format(raw.rstrip("\n"))
+        rendered = _tail_format(raw.rstrip("\n"), item_preview)
         if rendered:
             print(rendered, flush=True)
 
@@ -290,6 +316,7 @@ RANDOM_CONTROL: bool = bool(_FEAT.get("random_control", True))
 FILE_BROWSE: bool = bool(_FB.get("enabled", False))
 FILE_BROWSE_AUTO: bool = bool(_FB.get("auto", True))
 FILE_BROWSE_AUTO_RECURSIVE: bool = bool(_FB.get("auto_recursive", False))
+FILE_BROWSE_AUTO_BLACKLIST: str = str(_FB.get("auto_blacklist", "ignore")).strip().lower()
 FILE_BROWSE_LOG_ROOT_RELATIVE: bool = bool(_FB.get("log_root_relative", True))
 
 _DEFAULT_EXTS = ["mp4", "mkv", "avi", "mov", "webm", "mp3", "flac", "ogg", "m4a", "opus", "wav"]
@@ -346,25 +373,33 @@ _FILE_BLACKLIST_DIR_PATTERNS: list[list[str]] = _parse_blacklist_dirs()
 _FILE_BLACKLIST_TERMS: list[str] = _parse_blacklist_terms()
 
 
-def _is_blacklisted_term(name: str) -> bool:
-    if not _FILE_BLACKLIST_TERMS:
-        return False
+BlacklistLift = tuple[list[str], list[list[str]]]
+_NO_LIFT: BlacklistLift = ([], [])
+
+
+def _blacklist_term_hits(name: str) -> list[str]:
     lo = name.lower()
-    return any(t in lo for t in _FILE_BLACKLIST_TERMS)
+    return [t for t in _FILE_BLACKLIST_TERMS if t in lo]
 
 
-def _is_blacklisted_dir_path(rel_parts: list[str]) -> bool:
+def _is_blacklisted_term(name: str, lift: BlacklistLift = _NO_LIFT) -> bool:
+    return any(t not in lift[0] for t in _blacklist_term_hits(name))
+
+
+def _blacklist_dir_hits(rel_parts: list[str]) -> list[list[str]]:
     # rel_parts are already lowercased path components (no leading/trailing slashes)
-    if not _FILE_BLACKLIST_DIR_PATTERNS or not rel_parts:
-        return False
+    hits: list[list[str]] = []
     for pat in _FILE_BLACKLIST_DIR_PATTERNS:
         n = len(pat)
-        if n > len(rel_parts):
-            continue
         for i in range(0, len(rel_parts) - n + 1):
             if rel_parts[i:i + n] == pat:
-                return True
-    return False
+                hits.append(pat)
+                break
+    return hits
+
+
+def _is_blacklisted_dir_path(rel_parts: list[str], lift: BlacklistLift = _NO_LIFT) -> bool:
+    return any(pat not in lift[1] for pat in _blacklist_dir_hits(rel_parts))
 
 def require_playlist_control() -> None:
     if not ALLOW_PLAYLIST_CONTROL:
@@ -512,8 +547,16 @@ def _set_playback_mode(cid: str, name: str, value: str, switches: dict[str, bool
     log_event("action", who="web", cid=cid, identity=_client_identity(cid), op=f"{name}_mode", value=value)
 
 
+def _cmd_error_reason(exc: Exception) -> str:
+    return type(exc).__name__ if isinstance(exc, requests.RequestException) else str(exc)
+
+
 def _ws_err(ws, op: str, msg: str) -> None:
     _ws_send_safe(ws, json.dumps({"type": "cmd_error", "op": op, "message": msg}))
+
+
+def _log_quote(value) -> str:
+    return quote(str(value).replace("\n", " ").strip(), safe=":/,()[]@-_.")
 
 
 def log_event(event_type: str, **kv) -> None:
@@ -522,7 +565,10 @@ def log_event(event_type: str, **kv) -> None:
     for k, v in kv.items():
         if v is None:
             continue
-        s = quote(str(v).replace("\n", " ").strip(), safe=":/,()[]@-_.")
+        if isinstance(v, list):
+            s = _ITEM_SEPARATOR.join(_log_quote(item) for item in v)
+        else:
+            s = _log_quote(v)
         parts.append(f"{k}={s}")
     print(" ".join(parts), flush=True)
 
@@ -820,6 +866,7 @@ def vlc_get(path: str, *, params: dict | None = None):
         timeout=4,
     )
     r.raise_for_status()
+    r.encoding = "utf-8"
     return r
 
 
@@ -932,7 +979,7 @@ _vlc_lost_reason: str = ""
 _last_playlist_json: str | None = None
 _last_playlist: list[dict] = []
 _playlist_diff_ready = False
-_current_playing_dir_cache: str | None = None
+_auto_root_cache: tuple[str, BlacklistLift] | None = None
 _auto_root_last_log: str = ""
 
 
@@ -946,7 +993,7 @@ def _note_auto_miss(reason: str, **kv) -> None:
 
 
 def broadcaster_loop() -> None:
-    global _last_seen, _last_seen_mono, _last_playlist_json, _last_playlist, _current_playing_dir_cache, _pending_action, _vlc_reachable, _vlc_lost_reason, _playlist_diff_ready
+    global _last_seen, _last_seen_mono, _last_playlist_json, _last_playlist, _auto_root_cache, _pending_action, _vlc_reachable, _vlc_lost_reason, _playlist_diff_ready
 
     while True:
         time.sleep(0.75)
@@ -1120,7 +1167,7 @@ def broadcaster_loop() -> None:
             playlist_items = _apply_progress(playlist_items)
             _last_playlist = playlist_items
 
-            new_dir: str | None = None
+            new_root: tuple[str, BlacklistLift] | None = None
             if FILE_BROWSE_AUTO:
                 found_current = False
                 for item in playlist_items:
@@ -1132,7 +1179,12 @@ def broadcaster_loop() -> None:
                         path = unquote(urlparse(uri).path)
                         dir_path = os.path.dirname(path)
                         if os.path.isdir(dir_path):
-                            new_dir = os.path.realpath(dir_path)
+                            real_dir = os.path.realpath(dir_path)
+                            lift = _auto_dir_lift(real_dir, os.path.basename(path))
+                            if lift is None:
+                                _note_auto_miss("blacklisted", dir=real_dir)
+                            else:
+                                new_root = (real_dir, lift)
                         else:
                             _note_auto_miss("not_a_dir", uri=uri, dir=dir_path)
                     else:
@@ -1140,8 +1192,8 @@ def broadcaster_loop() -> None:
                     break
                 if not found_current and playlist_items:
                     _note_auto_miss("no_current")
-            if new_dir != _current_playing_dir_cache:
-                _current_playing_dir_cache = new_dir
+            if new_root != _auto_root_cache:
+                _auto_root_cache = new_root
 
             playlist_json = json.dumps(playlist_items, sort_keys=True)
             if playlist_json != _last_playlist_json:
@@ -1311,7 +1363,8 @@ def _record_host_removals(previous: list[dict], current: list[dict]) -> None:
         log_event("action", who="host", identity="Host", op="playlist_remove",
                   value=(vanished[0]["name"] or vanished[0]["uri"]))
     else:
-        log_event("action", who="host", identity="Host", op="playlist_remove_many", value=len(vanished))
+        log_event("action", who="host", identity="Host", op="playlist_remove_many", value=len(vanished),
+                  items=[item["name"] or item["uri"] for item in vanished])
     _record_removal(None, op, vanished)
 
 
@@ -1407,7 +1460,7 @@ def playlist_remove():
                   value=(names[removed[0]] or removed[0]))
     else:
         log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="playlist_remove_many",
-                  value=len(removed))
+                  value=len(removed), items=[names[playlist_id] or playlist_id for playlist_id in removed])
 
     removed_set = set(removed)
     _unexpect_removals([entry["uri"] for entry in entries if entry["id"] not in removed_set])
@@ -1421,8 +1474,8 @@ def _require_file_browse() -> None:
         abort(403)
 
 
-def _current_playing_dir() -> str | None:
-    return _current_playing_dir_cache if FILE_BROWSE_AUTO else None
+def _current_auto_root() -> tuple[str, BlacklistLift] | None:
+    return _auto_root_cache if FILE_BROWSE_AUTO else None
 
 
 def _now_playing_dir_realpath() -> str | None:
@@ -1442,7 +1495,7 @@ def _log_file_value(root_id: str, rel: str, full: str) -> str:
     if FILE_BROWSE_LOG_ROOT_RELATIVE:
         root_info = _resolve_root(root_id)
         if root_info:
-            _label, root, _rec = root_info
+            _label, root, _rec, _lift = root_info
             root_name = os.path.basename(root.rstrip(os.sep)) or root.strip(os.sep) or "root"
             rel_clean = (rel or "").strip("/")
             return f"/{root_name}/{rel_clean}" if rel_clean else f"/{root_name}"
@@ -1456,10 +1509,13 @@ def _log_file_value(root_id: str, rel: str, full: str) -> str:
     return full
 
 
-def _resolve_root(root_id: str) -> tuple[str, str, bool] | None:
+def _resolve_root(root_id: str) -> tuple[str, str, bool, BlacklistLift] | None:
     if root_id == "auto":
-        dir_path = _current_playing_dir()
-        return ("Now playing folder", dir_path, FILE_BROWSE_AUTO_RECURSIVE) if dir_path else None
+        auto_root = _current_auto_root()
+        if not auto_root:
+            return None
+        dir_path, lift = auto_root
+        return ("Now playing folder", dir_path, FILE_BROWSE_AUTO_RECURSIVE, lift)
     if not root_id.startswith("r"):
         return None
     try:
@@ -1467,11 +1523,11 @@ def _resolve_root(root_id: str) -> tuple[str, str, bool] | None:
     except ValueError:
         return None
     if 0 <= idx < len(_FILE_ROOTS):
-        return _FILE_ROOTS[idx]
+        return (*_FILE_ROOTS[idx], _NO_LIFT)
     return None
 
 
-def _safe_join(root: str, rel: str, *, allow_sub: bool = True) -> str | None:
+def _safe_join(root: str, rel: str, *, allow_sub: bool = True, lift: BlacklistLift = _NO_LIFT) -> str | None:
     rel = (rel or "").strip().lstrip("/").replace("\\", "/").rstrip("/")
     if rel and ".." in rel.split("/"):
         return None
@@ -1480,7 +1536,41 @@ def _safe_join(root: str, rel: str, *, allow_sub: bool = True) -> str | None:
     full = os.path.realpath(os.path.join(root, rel))
     if full != root and not full.startswith(root + os.sep):
         return None
+    if _is_hidden_under_root(root, full, lift):
+        return None
     return full
+
+
+def _is_hidden_under_root(root: str, full: str, lift: BlacklistLift = _NO_LIFT) -> bool:
+    if full == root:
+        return False
+    parts = os.path.relpath(full, root).split(os.sep)
+    if any(part.startswith(".") or _is_blacklisted_term(part, lift) for part in parts):
+        return True
+    dir_parts = parts if os.path.isdir(full) else parts[:-1]
+    return _is_blacklisted_dir_path([part.lower() for part in dir_parts], lift)
+
+
+def _auto_dir_lift(dir_path: str, file_name: str) -> BlacklistLift | None:
+    base = os.path.dirname(dir_path)
+    for _label, root, _recursive in _FILE_ROOTS:
+        if dir_path == root or dir_path.startswith(root + os.sep):
+            base = root
+            break
+    parts = os.path.relpath(dir_path, base).split(os.sep) if dir_path != base else []
+    if any(part.startswith(".") for part in parts):
+        return None
+    if FILE_BROWSE_AUTO_BLACKLIST == "ignore":
+        return (_FILE_BLACKLIST_TERMS, _FILE_BLACKLIST_DIR_PATTERNS)
+
+    dir_hits = _blacklist_dir_hits([part.lower() for part in parts])
+    if FILE_BROWSE_AUTO_BLACKLIST != "allow":
+        term_hits = [t for part in parts for t in _blacklist_term_hits(part)]
+        return None if term_hits or dir_hits else _NO_LIFT
+
+    names = [part.lower() for part in parts] + [file_name.lower()]
+    term_hits = [t for t in _FILE_BLACKLIST_TERMS if any(t in name for name in names)]
+    return (term_hits, dir_hits)
 
 
 def _ext_of(name: str) -> str:
@@ -1498,7 +1588,7 @@ def _path_to_uri(path: str) -> str:
     return "file://" + quote(path)
 
 
-def _list_dir(full: str, rel: str, *, allow_sub: bool = True) -> list[dict]:
+def _list_dir(full: str, rel: str, *, allow_sub: bool = True, lift: BlacklistLift = _NO_LIFT) -> list[dict]:
     entries: list[dict] = []
     try:
         names = os.listdir(full)
@@ -1523,13 +1613,13 @@ def _list_dir(full: str, rel: str, *, allow_sub: bool = True) -> list[dict]:
             if os.path.isdir(path):
                 if not allow_sub:
                     continue
-                if _is_blacklisted_term(name):
+                if _is_blacklisted_term(name, lift):
                     continue
-                if _is_blacklisted_dir_path(base_parts + [lo]):
+                if _is_blacklisted_dir_path(base_parts + [lo], lift):
                     continue
                 entries.append({"name": name, "type": "dir"})
             elif os.path.isfile(path) and _ext_allowed(name):
-                if _is_blacklisted_term(name):
+                if _is_blacklisted_term(name, lift):
                     continue
                 uri = _path_to_uri(path)
                 entry = {
@@ -1566,7 +1656,7 @@ def files_roots():
     _require_file_browse()
 
     out: list[dict] = []
-    if _current_playing_dir():
+    if _current_auto_root():
         out.append({"id": "auto", "label": "Now playing folder"})
     for i, (label, _rp, _rec) in enumerate(_FILE_ROOTS):
         out.append({"id": f"r{i}", "label": label})
@@ -1585,16 +1675,16 @@ def files_list():
     root_info = _resolve_root(root_id)
     if not root_info:
         abort(404)
-    label, root, recursive = root_info
+    label, root, recursive, lift = root_info
 
-    full = _safe_join(root, rel, allow_sub=recursive)
+    full = _safe_join(root, rel, allow_sub=recursive, lift=lift)
     if full is None or not os.path.isdir(full):
         abort(404)
 
     return jsonify({
         "root": {"id": root_id, "label": label, "recursive": recursive},
         "path": rel.strip("/"),
-        "entries": _list_dir(full, rel, allow_sub=recursive),
+        "entries": _list_dir(full, rel, allow_sub=recursive, lift=lift),
     })
 
 
@@ -1602,9 +1692,9 @@ def _resolve_file_path(root_id: str, rel: str) -> str | None:
     root_info = _resolve_root(root_id)
     if not root_info:
         return None
-    _label, root, recursive = root_info
+    _label, root, recursive, lift = root_info
 
-    full = _safe_join(root, rel, allow_sub=recursive)
+    full = _safe_join(root, rel, allow_sub=recursive, lift=lift)
     if full is None or not os.path.isfile(full) or not _ext_allowed(os.path.basename(full)):
         return None
     return full
@@ -1647,7 +1737,7 @@ def files_add():
         abort(400, "Missing path")
 
     added, already, failed = [], [], []
-    last_full = ""
+    added_names = []
     for rel in rels:
         full = _resolve_file_path(root_id, rel)
         if full is None:
@@ -1663,14 +1753,14 @@ def files_add():
             failed.append(rel)
             continue
         added.append(rel)
-        last_full = full
+        added_names.append(_log_file_value(root_id, rel, full))
 
     if len(added) == 1:
         log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="files_add",
-                  value=_log_file_value(root_id, added[0], last_full))
+                  value=added_names[0])
     elif added:
         log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="files_add_many",
-                  value=len(added))
+                  value=len(added), items=added_names)
 
     return jsonify({"added": added, "already": already, "failed": failed})
 
@@ -1794,7 +1884,7 @@ def _resolve_action_buffer(op: str, vlc_command: str) -> None:
         vlc_cmd(vlc_command)
     except Exception as exc:
         _clear_pending()
-        log_event("cmd_error", cid=winner, identity=_client_identity(winner), op=op, reason=str(exc))
+        log_event("cmd_error", cid=winner, identity=_client_identity(winner), op=op, reason=_cmd_error_reason(exc))
         return
 
     if op == "stop":
@@ -2036,7 +2126,7 @@ def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
                           value=(entry["name"] or entry["uri"]))
             else:
                 log_event("action", who="web", cid=cid, identity=_client_identity(cid), op="playlist_undo_many",
-                          value=len(restoring))
+                          value=len(restoring), items=[entry["name"] or entry["uri"] for _, entry in restoring])
 
         else:
             log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason="unknown_op")
@@ -2046,8 +2136,8 @@ def _dispatch_ws_cmd(ws, cid: str, data: dict) -> None:
 
     except Exception as exc:
         _clear_pending()
-        log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason=str(exc))
-        _ws_err(ws, op, str(exc))
+        log_event("cmd_error", cid=cid, identity=_client_identity(cid), op=op, reason=_cmd_error_reason(exc))
+        _ws_err(ws, op, "vlc unreachable" if isinstance(exc, requests.RequestException) else "failed")
 
 
 @sock.route("/ws")
